@@ -1,0 +1,13 @@
+{
+  "id": "band_arena",
+  "version": 1,
+  "tileSemanticsVersion": 1,
+  "cols": 8,
+  "rows": 3,
+  "semantics": [
+    1, 1, 1, 1, 1, 1, 1, 1,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    2, 2, 2, 2, 2, 2, 2, 2
+  ],
+  "entities": []
+}

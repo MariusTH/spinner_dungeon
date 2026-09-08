@@ -1,0 +1,71 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+Thumbs.db
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Claude Code: settings.json (shared team config) stays tracked, but
+# settings.local.json is per-machine and shouldn't be.
+.claude/settings.local.json
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+coverage/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# tool/generate_dungeon.dart's default dump for --render-image previews;
+# regeneratable from a seed, not hand-authored content.
+/output/
+
+# Secrets & deploy credentials — signing assets, API keys, env files.
+# CI reads these from GitHub Actions secrets, never from disk.
+*.env
+.env.*
+*.p12
+*.mobileprovision
+*.keystore
+*.jks
+butler_creds
+.itch.toml
+
+# itch.io web build artifacts (butler pushes straight from build/web, but a
+# hand-made zip sometimes ends up at the repo root during manual testing).
+/ssc-web-itch.zip
+*.itch.zip
