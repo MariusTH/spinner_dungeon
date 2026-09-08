@@ -1,0 +1,83 @@
+name: Deploy web build to itch.io
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: itch-web-deploy-main
+  cancel-in-progress: true
+
+env:
+  APP_VERSION: 0.0.1
+  ITCH_TARGET: parchnipp/spin-spin-carnage
+  # This must match the channel name shown on the itch.io dashboard for the
+  # HTML upload you already configured there (viewport, mobile-friendly,
+  # etc. are channel-level settings and only need to be set once via the
+  # dashboard — butler just pushes new builds to the same channel).
+  ITCH_CHANNEL: web
+
+jobs:
+  deploy-itch-web:
+    name: Build and push web build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze --no-fatal-infos
+
+      - name: Test
+        run: flutter test
+
+      - name: Build web release
+        run: |
+          set -euo pipefail
+
+          flutter build web \
+            --release \
+            --base-href / \
+            --build-name "$APP_VERSION" \
+            --build-number "$GITHUB_RUN_NUMBER"
+
+          # itch.io serves uploads from a non-root subpath, so the base href
+          # must be relative — Flutter's web loader resolves every asset URL
+          # against document.baseURI, and an absolute "/" base 404s once the
+          # app isn't sitting at a domain root.
+          sed -i 's#<base href="/">#<base href="./">#' build/web/index.html
+
+      - name: Install butler
+        run: |
+          set -euo pipefail
+
+          curl -L -o "$RUNNER_TEMP/butler.zip" https://broth.itch.zone/butler/linux-amd64/LATEST/archive/default
+          unzip -o "$RUNNER_TEMP/butler.zip" -d "$RUNNER_TEMP/butler"
+          chmod +x "$RUNNER_TEMP/butler/butler"
+          echo "$RUNNER_TEMP/butler" >> "$GITHUB_PATH"
+
+      - name: Push to itch.io
+        env:
+          # butler reads the BUTLER_API_KEY env var; the repo secret is
+          # named BUTLER_CREDENTIALS, so map it through here.
+          BUTLER_API_KEY: ${{ secrets.BUTLER_CREDENTIALS }}
+        run: |
+          set -euo pipefail
+
+          butler push build/web "$ITCH_TARGET:$ITCH_CHANNEL" \
+            --userversion "$APP_VERSION+$GITHUB_RUN_NUMBER"
