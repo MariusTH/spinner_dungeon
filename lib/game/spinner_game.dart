@@ -62,6 +62,7 @@ class RunStats {
   final int runScore;
   final int enemiesKilled;
   final int levelsCleared;
+
   /// Peak enemies defeated on a single spin this run (while spinner was moving).
   final int maxSpinChain;
 
@@ -111,6 +112,7 @@ class SpinnerGame extends FlameGame
   SpinnerGame();
 
   static const int _campaignLevelCount = 10;
+
   /// Space-invader layout: spinner near bottom, walkers spawn above this inset.
   static const double _invasionSpinnerBottomInset = 86;
   static const double _invasionWalkerSpawnMaxYInset = 220;
@@ -120,6 +122,7 @@ class SpinnerGame extends FlameGame
   static const double _bspTileSize = 48;
   static const double roomWidth = 760;
   static const double roomHeight = 560;
+
   /// Vertical pitch slightly larger than horizontal so dungeon layouts read
   /// taller on portrait screens (narrow grid + world spacing).
   static const double roomPitchX = 760;
@@ -199,6 +202,10 @@ class SpinnerGame extends FlameGame
       _activeThemeSprites?.wangTileSpritesByKey ?? const <String, Sprite>{};
   Sprite? get _lowerTerrainSprite => _activeThemeSprites?.lowerTerrainSprite;
   Sprite? get _upperTerrainSprite => _activeThemeSprites?.upperTerrainSprite;
+  List<Sprite> get _wallTileSprites =>
+      _activeThemeSprites?.wallTileSprites ?? const <Sprite>[];
+  List<Sprite> get _openFloorTileSprites =>
+      _activeThemeSprites?.openFloorTileSprites ?? const <Sprite>[];
 
   final Map<EnemyComponent, _GridPos> _enemyRooms =
       <EnemyComponent, _GridPos>{};
@@ -212,6 +219,7 @@ class SpinnerGame extends FlameGame
 
   bool _ready = false;
   bool _levelComplete = false;
+  bool _levelClearAcknowledged = false;
   bool _isCharging = false;
   bool _dungeonComplete = false;
   bool _isCameraGestureActive = false;
@@ -290,6 +298,7 @@ class SpinnerGame extends FlameGame
 
   // Weekly challenge.
   bool _runIsWeekly = false;
+
   /// Upgrade hub was opened from the main menu (not legacy post-run flow).
   bool _upgradeMenuOpenedFromMain = false;
 
@@ -329,6 +338,12 @@ class SpinnerGame extends FlameGame
   }
 
   bool get levelComplete => _levelComplete;
+
+  /// True once the player has dismissed the full "floor cleared" banner via
+  /// [acknowledgeLevelClear]. While false, the full banner + footer show;
+  /// once true, only a compact persistent descend button remains so the
+  /// player can keep exploring/looting before choosing to descend.
+  bool get levelClearAcknowledged => _levelClearAcknowledged;
   bool get isCharging => _isCharging;
   bool get spinnerMoving => _spinner?.isMoving ?? false;
   bool get dungeonComplete => _dungeonComplete;
@@ -435,6 +450,7 @@ class SpinnerGame extends FlameGame
         ? 'Blades: full reach — double-tap anywhere to tuck'
         : 'Blades: tucked — double-tap anywhere to extend';
   }
+
   bool get canStartRunFromHub =>
       _progressLoaded && _runPhase == RunPhase.upgrading;
   bool get pausedByMenu => _pausedByMenu;
@@ -560,7 +576,9 @@ class SpinnerGame extends FlameGame
     if (!showUnlockToast) {
       return 0.0;
     }
-    final t = (_unlockToastSeconds / _unlockToastDuration).clamp(0, 1).toDouble();
+    final t = (_unlockToastSeconds / _unlockToastDuration)
+        .clamp(0, 1)
+        .toDouble();
     return (t * 1.6).clamp(0, 1).toDouble();
   }
 
@@ -597,11 +615,22 @@ class SpinnerGame extends FlameGame
     final sunday = monday.add(const Duration(days: 6));
     String fmt(DateTime d) {
       const months = <String>[
-        'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+        'Jan',
+        'Feb',
+        'Mar',
+        'Apr',
+        'May',
+        'Jun',
+        'Jul',
+        'Aug',
+        'Sep',
+        'Oct',
+        'Nov',
+        'Dec',
       ];
       return '${months[d.month - 1]} ${d.day}';
     }
+
     return '${fmt(monday)} - ${fmt(sunday)}';
   }
 
@@ -615,7 +644,8 @@ class SpinnerGame extends FlameGame
       }
       if (best == null ||
           entry.score > best.score ||
-          (entry.score == best.score && entry.deepestLevel > best.deepestLevel)) {
+          (entry.score == best.score &&
+              entry.deepestLevel > best.deepestLevel)) {
         best = entry;
       }
     }
@@ -625,8 +655,11 @@ class SpinnerGame extends FlameGame
   bool get currentRunIsWeekly => _runIsWeekly;
 
   static (int year, int week) _isoWeek(DateTime date) {
-    final thursday = DateTime.utc(date.year, date.month, date.day)
-        .add(Duration(days: 4 - ((date.weekday + 6) % 7 + 1)));
+    final thursday = DateTime.utc(
+      date.year,
+      date.month,
+      date.day,
+    ).add(Duration(days: 4 - ((date.weekday + 6) % 7 + 1)));
     final firstThursday = DateTime.utc(thursday.year, 1, 4);
     final firstMonday = firstThursday.subtract(
       Duration(days: (firstThursday.weekday + 6) % 7),
@@ -643,7 +676,7 @@ class SpinnerGame extends FlameGame
   }
 
   String get levelClearBannerText =>
-      'FLOOR CLEARED\nScoop loot, then tap Descend when ready.';
+      'FLOOR CLEARED\nTap Continue to keep looting — descend whenever you\'re ready.';
 
   String get runEndReasonLabel {
     switch (_runEndReason) {
@@ -1166,21 +1199,18 @@ class SpinnerGame extends FlameGame
       return;
     }
 
-    final hitStop = heavyHit
-        ? 0.145
-        : (enemyDefeated ? 0.068 : 0.045);
+    final hitStop = heavyHit ? 0.145 : (enemyDefeated ? 0.068 : 0.045);
     _hitStopRemaining = max(_hitStopRemaining, hitStop);
 
-    final punch =
-        min(18.0, damage * 0.38 + impactSpeed * 0.011).clamp(4.0, 18.0);
+    final punch = min(
+      18.0,
+      damage * 0.38 + impactSpeed * 0.011,
+    ).clamp(4.0, 18.0);
     var bumpAdd = 0.0048 + punch * 0.0011;
     if (heavyHit) {
       bumpAdd *= 1.85;
     }
-    _cameraImpactZoomBump = min(
-      0.068,
-      _cameraImpactZoomBump + bumpAdd,
-    );
+    _cameraImpactZoomBump = min(0.068, _cameraImpactZoomBump + bumpAdd);
 
     if (heavyHit) {
       addScreenShake(15);
@@ -1874,9 +1904,7 @@ class SpinnerGame extends FlameGame
     _pendingDebugSpawnPlacement = null;
     _queuedDebugSpawnPlacements.clear();
     _activeRunSeed = _normalizedSeed(
-      isWeekly
-          ? weeklySeed
-          : (_configuredRunSeed ?? _random.nextInt(1 << 30)),
+      isWeekly ? weeklySeed : (_configuredRunSeed ?? _random.nextInt(1 << 30)),
     );
 
     _levels.clear();
@@ -1890,6 +1918,7 @@ class SpinnerGame extends FlameGame
 
     _dungeonComplete = false;
     _levelComplete = false;
+    _levelClearAcknowledged = false;
     _targetCameraZoom = _baseCameraZoom;
     _isCameraGestureActive = false;
     _isCameraDragActive = false;
@@ -1950,6 +1979,7 @@ class SpinnerGame extends FlameGame
 
     _dungeonComplete = false;
     _levelComplete = false;
+    _levelClearAcknowledged = false;
     _targetCameraZoom = _baseCameraZoom;
     _isCameraGestureActive = false;
     _isCameraDragActive = false;
@@ -2071,6 +2101,7 @@ class SpinnerGame extends FlameGame
     _lastDamageAmount = 0;
     _damageAlertSeconds = 0;
     _levelComplete = false;
+    _levelClearAcknowledged = false;
     _dungeonComplete = false;
     _currentRoomPos = null;
     _isCharging = false;
@@ -2090,6 +2121,17 @@ class SpinnerGame extends FlameGame
     }
     _spinner?.stop();
     _advanceToNextLevel();
+  }
+
+  /// Dismisses the full "floor cleared" banner so the player can keep
+  /// playing on the cleared floor; a compact descend button stays available
+  /// via [tryAdvanceAfterLevelClear] until they choose to move on.
+  void acknowledgeLevelClear() {
+    if (!_levelComplete || _levelClearAcknowledged) {
+      return;
+    }
+    _levelClearAcknowledged = true;
+    _notifyHud();
   }
 
   List<SpinnerPartDefinition> partsForSlot(SpinnerPartSlot slot) {
@@ -2383,20 +2425,20 @@ class SpinnerGame extends FlameGame
 
     final nextLeaderboard =
         (_runStats.runScore > 0 || _runStats.enemiesKilled > 0)
-            ? LeaderboardEntry.mergeTop(
-                _progress.leaderboard,
-                LeaderboardEntry(
-                  score: _runStats.runScore,
-                  deepestLevel: levelNumber,
-                  enemiesKilled: _runStats.enemiesKilled,
-                  recordedAtMs: DateTime.now().millisecondsSinceEpoch,
-                  seed: _activeRunSeed,
-                  maxSpinChain: _runStats.maxSpinChain,
-                  build: _selectedBuild,
-                  weeklyKey: _runIsWeekly ? weeklyKey : null,
-                ),
-              )
-            : _progress.leaderboard;
+        ? LeaderboardEntry.mergeTop(
+            _progress.leaderboard,
+            LeaderboardEntry(
+              score: _runStats.runScore,
+              deepestLevel: levelNumber,
+              enemiesKilled: _runStats.enemiesKilled,
+              recordedAtMs: DateTime.now().millisecondsSinceEpoch,
+              seed: _activeRunSeed,
+              maxSpinChain: _runStats.maxSpinChain,
+              build: _selectedBuild,
+              weeklyKey: _runIsWeekly ? weeklyKey : null,
+            ),
+          )
+        : _progress.leaderboard;
 
     _progress = _progress.copyWith(
       bestScore: max(_progress.bestScore, _runStats.runScore),
@@ -3480,6 +3522,7 @@ class SpinnerGame extends FlameGame
     _currentLevelIndex += 1;
     _currentRoomPos = _currentLevel?.start;
     _levelComplete = false;
+    _levelClearAcknowledged = false;
     _targetCameraZoom = _baseCameraZoom;
 
     _addScore(30 + _currentLevelIndex * 35, depthScaled: false);
@@ -3748,8 +3791,11 @@ class SpinnerGame extends FlameGame
       if (!isFloor(tx, ty + 1)) southByRow.putIfAbsent(ty, () => []).add(tx);
     }
 
-    void emitVertical(Map<int, List<int>> byCol, double Function(int) edgeX,
-        WallSide side) {
+    void emitVertical(
+      Map<int, List<int>> byCol,
+      double Function(int) edgeX,
+      WallSide side,
+    ) {
       byCol.forEach((tx, tys) {
         tys.sort();
         var runStart = tys.first;
@@ -3777,8 +3823,11 @@ class SpinnerGame extends FlameGame
       });
     }
 
-    void emitHorizontal(Map<int, List<int>> byRow, double Function(int) edgeY,
-        WallSide side) {
+    void emitHorizontal(
+      Map<int, List<int>> byRow,
+      double Function(int) edgeY,
+      WallSide side,
+    ) {
       byRow.forEach((ty, txs) {
         txs.sort();
         var runStart = txs.first;
@@ -3807,12 +3856,18 @@ class SpinnerGame extends FlameGame
     }
 
     // East void -> normal points west (WallSide.right); etc.
-    emitVertical(eastByCol, (tx) => mapMargin + (tx + 1) * tileSize,
-        WallSide.right);
+    emitVertical(
+      eastByCol,
+      (tx) => mapMargin + (tx + 1) * tileSize,
+      WallSide.right,
+    );
     emitVertical(westByCol, (tx) => mapMargin + tx * tileSize, WallSide.left);
     emitHorizontal(northByRow, (ty) => mapMargin + ty * tileSize, WallSide.top);
-    emitHorizontal(southByRow, (ty) => mapMargin + (ty + 1) * tileSize,
-        WallSide.bottom);
+    emitHorizontal(
+      southByRow,
+      (ty) => mapMargin + (ty + 1) * tileSize,
+      WallSide.bottom,
+    );
   }
 
   /// Paints semantic tile overlays and spawns interior walls / pits / hurt rects
@@ -3858,7 +3913,12 @@ class SpinnerGame extends FlameGame
         final cx = rect.left + (x + 0.5) * cellW;
         final cy = rect.top + (y + 0.5) * cellH;
 
-        final sprite = mapping.spriteForSemantic(sprites, s);
+        final isWallCell = TileSemantics.createsSolidWall(s);
+        final wallSprites = _wallTileSprites;
+        final sprite = isWallCell && wallSprites.isNotEmpty
+            ? wallSprites[(((x * 83492791) ^ (y * 1234559)) & 0x7fffffff) %
+                  wallSprites.length]
+            : mapping.spriteForSemantic(sprites, s);
         if (sprite != null) {
           overlay.add(
             SpriteComponent(
@@ -3976,13 +4036,16 @@ class SpinnerGame extends FlameGame
           _random.nextDouble() - 0.5,
         );
 
-        final walkerArchetype =
-            _archetypeForSpawn(type: EnemyType.walker, room: room);
+        final walkerArchetype = _archetypeForSpawn(
+          type: EnemyType.walker,
+          room: room,
+        );
         final walkerHpScale = walkerArchetype == EnemyArchetype.standard
             ? 0.88
             : 1.0;
-        final stalkerSpeed =
-            walkerArchetype == EnemyArchetype.stalker ? 1.16 : 1.0;
+        final stalkerSpeed = walkerArchetype == EnemyArchetype.stalker
+            ? 1.16
+            : 1.0;
 
         final enemy = EnemyComponent.walker(
           position: _randomSpawnInRoom(
@@ -3997,14 +4060,14 @@ class SpinnerGame extends FlameGame
           hpMultiplier: (dangerScale * eliteScale * walkerHpScale)
               .clamp(0.8, 3.8)
               .toDouble(),
-          speedMultiplier: (0.88 + dangerScale * 0.16)
-              .clamp(0.8, 2.4)
-              .toDouble() *
+          speedMultiplier:
+              (0.88 + dangerScale * 0.16).clamp(0.8, 2.4).toDouble() *
               stalkerSpeed,
-          contactDamageMultiplier: ((0.88 + dangerScale * 0.18) *
-                  (walkerArchetype == EnemyArchetype.stalker ? 1.08 : 1.0))
-              .clamp(0.8, 2.85)
-              .toDouble(),
+          contactDamageMultiplier:
+              ((0.88 + dangerScale * 0.18) *
+                      (walkerArchetype == EnemyArchetype.stalker ? 1.08 : 1.0))
+                  .clamp(0.8, 2.85)
+                  .toDouble(),
           coinDropBonus: room.type == RoomType.treasure ? 1 : 0,
         );
         _enemies.add(enemy);
@@ -4134,7 +4197,8 @@ class SpinnerGame extends FlameGame
           );
           _pits.add(pit);
           world.add(pit);
-          carvedFloorForPits = _carveFloorCellsForPit(pit) || carvedFloorForPits;
+          carvedFloorForPits =
+              _carveFloorCellsForPit(pit) || carvedFloorForPits;
         }
       }
 
@@ -4290,6 +4354,7 @@ class SpinnerGame extends FlameGame
 
     if (_gameMode == SpinnerGameMode.invasion) {
       _levelComplete = false;
+      _levelClearAcknowledged = false;
       if (notify) {
         _notifyHud();
       }
@@ -4328,6 +4393,7 @@ class SpinnerGame extends FlameGame
         .every((room) => room.cleared);
 
     if (_runPhase == RunPhase.playing && _levelComplete && !wasLevelComplete) {
+      _levelClearAcknowledged = false;
       _isCharging = false;
       _spinDetector.reset();
       _spinner?.clearChargePreview();
@@ -4422,7 +4488,8 @@ class SpinnerGame extends FlameGame
       ),
     );
 
-    if (_floorTileSprites.isNotEmpty) {
+    final wallSprites = _wallTileSprites;
+    if (wallSprites.isNotEmpty || _floorTileSprites.isNotEmpty) {
       final startX = (rect.left / _floorTileWorldSize).floor();
       final endX = (rect.right / _floorTileWorldSize).ceil();
       final startY = (rect.top / _floorTileWorldSize).floor();
@@ -4431,12 +4498,20 @@ class SpinnerGame extends FlameGame
       for (var y = startY; y < endY; y++) {
         for (var x = startX; x < endX; x++) {
           final variant = ((x * 83492791) ^ (y * 1234559)) & 0x7fffffff;
-          final spriteIndices = vertical
-              ? const <int>[12, 13, 14, 15]
-              : const <int>[8, 9, 10, 11];
-          final sprite =
-              _upperTerrainSprite ??
-              _floorTileSprites[spriteIndices[variant % spriteIndices.length]];
+          final Sprite sprite;
+          if (wallSprites.isNotEmpty) {
+            // Dedicated, visually-distinct wall art — read as an obstacle
+            // instead of blending with floor tiles.
+            sprite = wallSprites[variant % wallSprites.length];
+          } else {
+            final spriteIndices = vertical
+                ? const <int>[12, 13, 14, 15]
+                : const <int>[8, 9, 10, 11];
+            sprite =
+                _upperTerrainSprite ??
+                _floorTileSprites[spriteIndices[variant %
+                    spriteIndices.length]];
+          }
           final centerX =
               (x * _floorTileWorldSize) + (_floorTileWorldSize * 0.5);
           final centerY =
@@ -4564,15 +4639,67 @@ class SpinnerGame extends FlameGame
         // from the 16-tile grid, just without precise corner matching.
       }
 
+      final wallTileSprites = await _loadWallTileSprites(asset.wallPngAsset);
+      final openFloorTileSprites = await _loadTileStrip(
+        asset.openFloorPngAsset,
+        kOpenFloorVariantCount,
+      );
+
       return _ThemeSprites(
         image: image,
         floorTileSprites: floorTileSprites,
         wangTileSpritesByKey: wangTileSpritesByKey,
         lowerTerrainSprite: lowerTerrainSprite,
         upperTerrainSprite: upperTerrainSprite,
+        wallTileSprites: wallTileSprites,
+        openFloorTileSprites: openFloorTileSprites,
       );
     } catch (_) {
       return null;
+    }
+  }
+
+  /// Loads a dedicated, seamlessly-tileable wall texture if the theme ships
+  /// one. Returns an empty list when [wallPngAsset] is null or fails to
+  /// load, so callers can fall back to reusing floor art.
+  Future<List<Sprite>> _loadWallTileSprites(String? wallPngAsset) async {
+    if (wallPngAsset == null) {
+      return const <Sprite>[];
+    }
+    try {
+      final image = await images.load(wallPngAsset);
+      if (image.width <= 0 || image.height <= 0) {
+        return const <Sprite>[];
+      }
+      return <Sprite>[Sprite(image)];
+    } catch (_) {
+      return const <Sprite>[];
+    }
+  }
+
+  /// Loads [count] equal-width square tiles packed side by side in one strip
+  /// image. Returns an empty list when [path] is null or fails to load.
+  Future<List<Sprite>> _loadTileStrip(String? path, int count) async {
+    if (path == null || count <= 0) {
+      return const <Sprite>[];
+    }
+    try {
+      final image = await images.load(path);
+      final tileWidth = image.width / count;
+      final tileHeight = image.height.toDouble();
+      if (tileWidth <= 0 || tileHeight <= 0) {
+        return const <Sprite>[];
+      }
+      return <Sprite>[
+        for (var i = 0; i < count; i++)
+          Sprite(
+            image,
+            srcPosition: Vector2(i * tileWidth, 0),
+            srcSize: Vector2(tileWidth, tileHeight),
+          ),
+      ];
+    } catch (_) {
+      return const <Sprite>[];
     }
   }
 
@@ -4622,16 +4749,26 @@ class SpinnerGame extends FlameGame
           continue;
         }
 
-        final sprite =
-            _wangTileSpritesByKey[_wangKey(nw: nw, ne: ne, sw: sw, se: se)] ??
-            _wangTileSpritesByKey[_wangKey(
-              nw: true,
-              ne: true,
-              sw: true,
-              se: true,
-            )] ??
-            _lowerTerrainSprite ??
-            _floorTileSprites[_tileIndexForGrid(x, y)];
+        final openFloorSprites = _openFloorTileSprites;
+        final Sprite sprite;
+        if (nw && ne && sw && se && openFloorSprites.isNotEmpty) {
+          // Fully-interior cell, no wall/path edge nearby — the plain Wang
+          // tile repeats identically here across large open rooms and reads
+          // as a visible grid. Break it up with a varied, seamless tile.
+          final variant = ((x * 83492791) ^ (y * 1234559)) & 0x7fffffff;
+          sprite = openFloorSprites[variant % openFloorSprites.length];
+        } else {
+          sprite =
+              _wangTileSpritesByKey[_wangKey(nw: nw, ne: ne, sw: sw, se: se)] ??
+              _wangTileSpritesByKey[_wangKey(
+                nw: true,
+                ne: true,
+                sw: true,
+                se: true,
+              )] ??
+              _lowerTerrainSprite ??
+              _floorTileSprites[_tileIndexForGrid(x, y)];
+        }
         final centerX = (x * _floorTileWorldSize) + (_floorTileWorldSize * 0.5);
         final centerY = (y * _floorTileWorldSize) + (_floorTileWorldSize * 0.5);
         container.add(
@@ -5321,6 +5458,8 @@ class SpinnerGame extends FlameGame
 
       _dungeonComplete = payload['dungeonComplete'] as bool? ?? false;
       _levelComplete = payload['levelComplete'] as bool? ?? false;
+      _levelClearAcknowledged =
+          payload['levelClearAcknowledged'] as bool? ?? false;
       _lastDamageSource = payload['lastDamageSource'] as String? ?? '-';
       _lastDamageAmount = 0;
       _damageAlertSeconds = 0;
@@ -5556,6 +5695,7 @@ class SpinnerGame extends FlameGame
       'pitSavesRemaining': _pitSavesRemaining,
       'dungeonComplete': _dungeonComplete,
       'levelComplete': _levelComplete,
+      'levelClearAcknowledged': _levelClearAcknowledged,
       'lastDamageSource': _lastDamageSource,
       'targetCameraZoom': _targetCameraZoom,
       'cameraZoom': camera.viewfinder.zoom,
@@ -5746,7 +5886,8 @@ class SpinnerGame extends FlameGame
           );
           _pits.add(pit);
           world.add(pit);
-          carvedFloorForPits = _carveFloorCellsForPit(pit) || carvedFloorForPits;
+          carvedFloorForPits =
+              _carveFloorCellsForPit(pit) || carvedFloorForPits;
         }
       }
     }
@@ -6273,6 +6414,8 @@ class _ThemeSprites {
     required this.wangTileSpritesByKey,
     required this.lowerTerrainSprite,
     required this.upperTerrainSprite,
+    this.wallTileSprites = const <Sprite>[],
+    this.openFloorTileSprites = const <Sprite>[],
   });
 
   final ui.Image image;
@@ -6280,6 +6423,17 @@ class _ThemeSprites {
   final Map<String, Sprite> wangTileSpritesByKey;
   final Sprite? lowerTerrainSprite;
   final Sprite? upperTerrainSprite;
+
+  /// Dedicated wall texture variants (distinct from floor art), sliced from
+  /// [DungeonThemeAssets.wallPngAsset]. Empty when the theme ships no wall art
+  /// yet, in which case callers fall back to floor-sprite reuse.
+  final List<Sprite> wallTileSprites;
+
+  /// Variant tiles for fully-interior floor cells, sliced from
+  /// [DungeonThemeAssets.openFloorPngAsset]. Empty when the theme ships none,
+  /// in which case callers fall back to the plain Wang floor tile (which
+  /// visibly repeats across large open rooms).
+  final List<Sprite> openFloorTileSprites;
 }
 
 class _GridPos {

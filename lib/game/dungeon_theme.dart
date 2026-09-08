@@ -25,6 +25,8 @@ class DungeonThemeAssets {
     required this.pngAsset,
     required this.jsonAsset,
     required this.label,
+    this.wallPngAsset,
+    this.openFloorPngAsset,
   });
 
   final DungeonTheme theme;
@@ -37,7 +39,25 @@ class DungeonThemeAssets {
 
   /// Short, human-readable label. Used for diagnostics.
   final String label;
+
+  /// Optional wall texture, passed to `Flame.images.load` (relative to
+  /// `assets/images/`) — a single seamlessly-tileable square image, visually
+  /// distinct from floor art. When absent, wall rendering falls back to
+  /// reusing floor art (legacy behaviour).
+  final String? wallPngAsset;
+
+  /// Optional open-floor variant strip, passed to `Flame.images.load`
+  /// (relative to `assets/images/`) — [kOpenFloorVariantCount] equal-width
+  /// seamlessly-tileable square tiles side by side. Used only for
+  /// fully-interior floor cells (away from any wall/path edge) to break up
+  /// the visible-grid look of repeating the base Wang tile across large open
+  /// rooms. When absent, falls back to the theme's plain Wang floor tile.
+  final String? openFloorPngAsset;
 }
+
+/// Number of variant tiles packed side by side in an [DungeonThemeAssets.
+/// openFloorPngAsset] strip.
+const int kOpenFloorVariantCount = 3;
 
 /// Static registry. Keep the order aligned with progression: earliest theme
 /// first so it acts as the implicit fallback when a later theme fails to load.
@@ -47,24 +67,32 @@ const List<DungeonThemeAssets> kDungeonThemeAssets = <DungeonThemeAssets>[
     pngAsset: 'dungeon/theme_temple_warm.png',
     jsonAsset: 'assets/images/dungeon/theme_temple_warm.json',
     label: 'Warm Temple',
+    wallPngAsset: 'dungeon/theme_temple_warm_wall.png',
+    openFloorPngAsset: 'dungeon/theme_temple_warm_floor_open.png',
   ),
   DungeonThemeAssets(
     theme: DungeonTheme.cryptCool,
     pngAsset: 'dungeon/theme_crypt_cool.png',
     jsonAsset: 'assets/images/dungeon/theme_crypt_cool.json',
     label: 'Cool Crypt',
+    wallPngAsset: 'dungeon/theme_crypt_cool_wall.png',
+    openFloorPngAsset: 'dungeon/theme_crypt_cool_floor_open.png',
   ),
   DungeonThemeAssets(
     theme: DungeonTheme.magicChamber,
     pngAsset: 'dungeon/theme_magic_chamber.png',
     jsonAsset: 'assets/images/dungeon/theme_magic_chamber.json',
     label: 'Mage Chamber',
+    wallPngAsset: 'dungeon/theme_magic_chamber_wall.png',
+    openFloorPngAsset: 'dungeon/theme_magic_chamber_floor_open.png',
   ),
   DungeonThemeAssets(
     theme: DungeonTheme.wardenArena,
     pngAsset: 'dungeon/theme_warden_arena.png',
     jsonAsset: 'assets/images/dungeon/theme_warden_arena.json',
     label: "Warden's Arena",
+    wallPngAsset: 'dungeon/theme_warden_arena_wall.png',
+    openFloorPngAsset: 'dungeon/theme_warden_arena_floor_open.png',
   ),
 ];
 

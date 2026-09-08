@@ -90,25 +90,39 @@ class Hud extends StatelessWidget {
               else if (game.runPhase == RunPhase.runOver)
                 Center(child: _RunOverBanner(game: game))
               else if (game.levelComplete) ...[
-                // Full-screen pass-through so the playfield can receive spin
-                // gestures. The footer is a separate sibling painted above this.
-                Positioned.fill(
-                  child: IgnorePointer(
-                    child: Center(
-                      child: _LevelClearBanner(
-                        text: game.levelClearBannerText,
+                if (!game.levelClearAcknowledged) ...[
+                  // Full-screen pass-through so the playfield can receive
+                  // spin gestures. The footer is a separate sibling painted
+                  // above this.
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: Center(
+                        child: _LevelClearBanner(
+                          text: game.levelClearBannerText,
+                        ),
                       ),
                     ),
                   ),
-                ),
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  child: _LevelClearDescendFooter(
-                    onDescend: game.tryAdvanceAfterLevelClear,
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: _LevelClearFooter(
+                      label: 'Continue',
+                      onPressed: game.acknowledgeLevelClear,
+                    ),
                   ),
-                ),
+                ] else
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: _LevelClearFooter(
+                      label: 'Descend',
+                      compact: true,
+                      onPressed: game.tryAdvanceAfterLevelClear,
+                    ),
+                  ),
               ],
               if (game.pausedByMenu)
                 const Center(
@@ -279,10 +293,14 @@ class _HudDebugRunPanel extends StatelessWidget {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
-                  color: WorkbenchPalette.actionHighlight.withValues(alpha: 0.2),
+                  color: WorkbenchPalette.actionHighlight.withValues(
+                    alpha: 0.2,
+                  ),
                   borderRadius: BorderRadius.circular(6),
                   border: Border.all(
-                    color: WorkbenchPalette.actionHighlight.withValues(alpha: 0.85),
+                    color: WorkbenchPalette.actionHighlight.withValues(
+                      alpha: 0.85,
+                    ),
                   ),
                 ),
                 child: const Text(
@@ -308,7 +326,9 @@ class _HudDebugRunPanel extends StatelessWidget {
                     ),
                     _InfoChip(text: 'Score ${game.runScore}'),
                   ] else ...[
-                    _InfoChip(text: 'Lv ${game.levelNumber}/${game.totalLevels}'),
+                    _InfoChip(
+                      text: 'Lv ${game.levelNumber}/${game.totalLevels}',
+                    ),
                     _InfoChip(text: 'Score ${game.runScore}'),
                     _InfoChip(text: 'Coins ${game.runCoins}'),
                     _InfoChip(
@@ -317,9 +337,7 @@ class _HudDebugRunPanel extends StatelessWidget {
                     ),
                   ],
                   if (game.spinnerMoving && game.spinChainKills >= 2)
-                    _InfoChip(
-                      text: 'Chain ×${game.spinChainKills}',
-                    ),
+                    _InfoChip(text: 'Chain ×${game.spinChainKills}'),
                 ],
               ),
               const SizedBox(height: 8),
@@ -1146,7 +1164,6 @@ Color _powerupColor(PowerupType type) {
   }
 }
 
-
 class _LevelClearBanner extends StatelessWidget {
   const _LevelClearBanner({required this.text});
 
@@ -1163,10 +1180,19 @@ class _LevelClearBanner extends StatelessWidget {
   }
 }
 
-class _LevelClearDescendFooter extends StatelessWidget {
-  const _LevelClearDescendFooter({required this.onDescend});
+class _LevelClearFooter extends StatelessWidget {
+  const _LevelClearFooter({
+    required this.label,
+    required this.onPressed,
+    this.compact = false,
+  });
 
-  final VoidCallback onDescend;
+  final String label;
+  final VoidCallback onPressed;
+
+  /// True for the small persistent "Descend" control shown after the player
+  /// has tapped Continue and is free to keep exploring the cleared floor.
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
@@ -1181,7 +1207,9 @@ class _LevelClearDescendFooter extends StatelessWidget {
           children: [
             DecoratedBox(
               decoration: BoxDecoration(
-                color: WorkbenchPalette.deepVoid.withValues(alpha: 0.88),
+                color: WorkbenchPalette.deepVoid.withValues(
+                  alpha: compact ? 0.72 : 0.88,
+                ),
                 border: Border(
                   top: BorderSide(
                     color: WorkbenchPalette.actionHighlight.withValues(
@@ -1199,22 +1227,27 @@ class _LevelClearDescendFooter extends StatelessWidget {
                 ],
               ),
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                padding: EdgeInsets.fromLTRB(
+                  12,
+                  compact ? 6 : 10,
+                  12,
+                  compact ? 6 : 10,
+                ),
                 child: FilledButton(
-                  onPressed: onDescend,
+                  onPressed: onPressed,
                   style: FilledButton.styleFrom(
                     backgroundColor: const Color(0xFF1E4D7A),
                     foregroundColor: const Color(0xFFE6F8FF),
-                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    padding: EdgeInsets.symmetric(vertical: compact ? 10 : 16),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),
                     ),
                   ),
-                  child: const Text(
-                    'Tap to descend',
+                  child: Text(
+                    label,
                     textAlign: TextAlign.center,
                     style: TextStyle(
-                      fontSize: 18,
+                      fontSize: compact ? 14 : 18,
                       fontWeight: FontWeight.w800,
                       letterSpacing: 0.3,
                     ),
