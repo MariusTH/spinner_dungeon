@@ -172,4 +172,25 @@ void main() {
       expect(roomJson.containsKey('items'), isFalse);
     }
   });
+
+  test('the Warden boss room spawns on the final campaign floor only', () {
+    const finalFloor = DungeonLevelGenerator.campaignFloorCount;
+    for (final seed in <int>[1, 42, 9001]) {
+      for (var floor = 1; floor <= finalFloor; floor++) {
+        final level = generator.generateCampaignLevel(
+          levelNumber: floor,
+          seed: seed,
+        );
+        final bossRooms = level.rooms
+            .where((room) => room.type == DungeonRoomType.boss)
+            .toList();
+        if (floor == finalFloor) {
+          expect(bossRooms, hasLength(1), reason: 'seed $seed');
+          expect(bossRooms.first.monsters!.single.type, 'boss');
+        } else {
+          expect(bossRooms, isEmpty, reason: 'seed $seed floor $floor');
+        }
+      }
+    }
+  });
 }

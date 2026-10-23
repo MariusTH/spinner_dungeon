@@ -4,6 +4,7 @@ import 'package:flame/collisions.dart';
 import 'package:flame/components.dart';
 import 'package:flutter/material.dart';
 
+import 'pickup_magnet.dart';
 import 'spinner_component.dart';
 import 'spinner_game.dart';
 
@@ -67,6 +68,7 @@ class PowerupComponent extends CircleComponent
   final double durationSeconds;
 
   bool _consumed = false;
+  final PickupMagnet _magnet = PickupMagnet(attractRadius: 130);
   double _age = 0;
 
   bool get isConsumed => _consumed;
@@ -100,6 +102,29 @@ class PowerupComponent extends CircleComponent
     // Component rotation stays zero — the visual spin happens inside render so
     // the bob + rotation can share the same base orientation without tilting
     // the hitbox.
+
+    final spinner = game.spinner;
+    final collect = _magnet.update(
+      dt,
+      pickup: this,
+      pickupRadius: radius,
+      spinnerPosition: spinner?.position,
+      spinnerRadius: spinner?.radius ?? 0,
+      spinnerSpeed: spinner?.velocity.length ?? 0,
+      rangeBoost: game.levelComplete ? 40 : 1,
+    );
+    if (collect) {
+      _collect();
+    }
+  }
+
+  void _collect() {
+    if (_consumed) {
+      return;
+    }
+    _consumed = true;
+    game.onPowerupCollected(this);
+    removeFromParent();
   }
 
   @override
@@ -112,7 +137,8 @@ class PowerupComponent extends CircleComponent
     // Procedural floating bob — visual only, not positional. Keeps the orb
     // feeling alive without the component drifting off its spawn point.
     final bob = sin(_age * 3.4) * 2.2;
-    canvas.translate(0, bob);
+    final shake = _magnet.shakeOffset();
+    canvas.translate(shake.dx, bob + shake.dy);
 
     // Soft drop shadow a few px below the orb grounds it on the floor.
     canvas.save();
@@ -207,7 +233,10 @@ class PowerupComponent extends CircleComponent
       final tipX = cos(theta) * radius * 0.85;
       final tipY = sin(theta) * radius * 0.85;
       final path = Path()
-        ..moveTo(cos(theta + 0.55) * radius * 0.48, sin(theta + 0.55) * radius * 0.48)
+        ..moveTo(
+          cos(theta + 0.55) * radius * 0.48,
+          sin(theta + 0.55) * radius * 0.48,
+        )
         ..quadraticBezierTo(
           cos(theta) * radius * 0.9,
           sin(theta) * radius * 0.9,
@@ -249,7 +278,10 @@ class PowerupComponent extends CircleComponent
         cos(theta - 0.22) * radius * 0.62,
         sin(theta - 0.22) * radius * 0.62,
       );
-      final tip = Offset(cos(theta) * radius * 1.02, sin(theta) * radius * 1.02);
+      final tip = Offset(
+        cos(theta) * radius * 1.02,
+        sin(theta) * radius * 1.02,
+      );
       final path = Path()
         ..moveTo(baseA.dx, baseA.dy)
         ..lineTo(tip.dx, tip.dy)
@@ -315,9 +347,7 @@ class PowerupComponent extends CircleComponent
     }
 
     if (other is SpinnerComponent) {
-      _consumed = true;
-      game.onPowerupCollected(this);
-      removeFromParent();
+      _collect();
     }
   }
 }

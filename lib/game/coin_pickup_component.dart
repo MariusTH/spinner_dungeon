@@ -2,6 +2,7 @@ import 'package:flame/collisions.dart';
 import 'package:flame/components.dart';
 import 'package:flutter/material.dart';
 
+import 'pickup_magnet.dart';
 import 'spinner_component.dart';
 import 'spinner_game.dart';
 
@@ -13,6 +14,9 @@ class CoinPickupComponent extends CircleComponent
     Vector2? initialVelocity,
     this.lifeTime = 12,
   }) : _velocity = initialVelocity ?? Vector2.zero(),
+       _magnet = PickupMagnet(
+         armDelay: (initialVelocity?.length2 ?? 0) > 0 ? 0.3 : 0,
+       ),
        super(
          position: position,
          radius: 7,
@@ -24,6 +28,7 @@ class CoinPickupComponent extends CircleComponent
   final double lifeTime;
 
   Vector2 _velocity;
+  final PickupMagnet _magnet;
   double _alive = 0;
   bool _collected = false;
 
@@ -51,9 +56,35 @@ class CoinPickupComponent extends CircleComponent
       return;
     }
 
-    position += _velocity * dt;
-    _velocity *= 0.92;
+    if (!_magnet.isHoming) {
+      position += _velocity * dt;
+      _velocity *= 0.92;
+    }
     angle += dt * 2.3;
+
+    final spinner = game.spinner;
+    final collect = _magnet.update(
+      dt,
+      pickup: this,
+      pickupRadius: radius,
+      spinnerPosition: spinner?.position,
+      spinnerRadius: spinner?.radius ?? 0,
+      spinnerSpeed: spinner?.velocity.length ?? 0,
+      // Once the floor is cleared, vacuum up every coin left on it.
+      rangeBoost: game.levelComplete ? 40 : 1,
+    );
+    if (collect) {
+      _collect();
+    }
+  }
+
+  void _collect() {
+    if (_collected) {
+      return;
+    }
+    _collected = true;
+    game.onCoinCollected(this);
+    removeFromParent();
   }
 
   @override
@@ -66,6 +97,8 @@ class CoinPickupComponent extends CircleComponent
     // blob with a sprite offset from it.
     canvas.save();
     canvas.translate(radius, radius);
+    final shake = _magnet.shakeOffset();
+    canvas.translate(shake.dx, shake.dy);
 
     canvas.drawCircle(Offset.zero, radius, paint);
 
@@ -93,9 +126,7 @@ class CoinPickupComponent extends CircleComponent
     }
 
     if (other is SpinnerComponent) {
-      _collected = true;
-      game.onCoinCollected(this);
-      removeFromParent();
+      _collect();
     }
   }
 }

@@ -23,7 +23,7 @@ Source: `EnemyTaxonomy.bodyColorForType`, `EnemyComponent` constructors.
 | **Walker** | `#F0B248` amber | 16 | **Mobile.** Picks mixed wander / pursuit directions; occasional **dash** toward the spinner (with telegraph). In invasion mode, also **drifts downward**. |
 | **Boss** | `#E87E4E` orange | 24 | **Chaser + shooter.** Moves in a pursuit+orbit pattern. Fires **fan of five** telegraphed shots. |
 | **Paddle** | `#E35B5B` red-pink | 18 | **Prop hazard.** Bobbing plank; **does not count** toward room clear. No contact damage by default — **blocks / deflects** the spinner. |
-| **Hedgehog** | `#8A9F56` green | 24 | **Lane-locked.** Slides on **one axis** only; **spike side** along patrol (dangerous contact + armored); **weak sides** perpendicular (safe to strike). Weak zones get a **glow tell**. |
+| **Hedgehog** | `#8A9F56` green | 24 | **Lane-locked.** Slides on **one axis** only. **Spike side** along patrol hurts the spinner and is **armoured** (hits deal 35%, "CLANK"); **weak sides** perpendicular take a **critical** 2× hit ("CRIT!"). Never fully immune. Weak zones get a **glow tell**. |
 | **Pulser** | `#9B5FD6` purple | 19 | **Mobile** like a walker. Periodically triggers a **ground slam** — large **AOE** after telegraph (damage in a big radius). |
 
 ### Type marker shapes (primary / secondary)
@@ -52,6 +52,22 @@ Stacked on the same marker row; affects stats and some AI. Source: `EnemyArchety
 | **stalker** | `#FF5C5C` red | △+□ | **Walker** pathing favors **direct pursuit** (less random wander). |
 
 Blower / sucker auras are **disabled in invasion mode** (`_applyArchetypeAuras`).
+
+## Killability rule and skill checks
+
+Every enemy can always be damaged. `EnemyComponent.spinnerHitKind` classifies each spinner strike into an `EnemyHitKind`, which only scales damage and names a callout:
+
+| Enemy | Skill check | Kind | Damage |
+|-------|-------------|------|--------|
+| Hedgehog | Strike a weak (perpendicular) side | `CRIT!` | 2× |
+| Hedgehog | Strike the spike side (also hurts you) | `CLANK` | 0.35× |
+| Turret | Strike from behind while its aim is locked for a shot | `BACKSTAB!` | 2.5× |
+| Walker | Strike it mid-dash or during the dash wind-up | `COUNTER!` | 2× |
+| Pulser | Strike it while its slam charges — the slam is cancelled and it explodes, hurting nearby enemies | `OVERLOAD!` | 2× |
+
+Pulser slams that do land also hurt other enemies caught in them (80% damage).
+
+Enemy HP scales with depth at roughly half the rate of other danger stats (`_enemyHpScale`, x0.87–1.9), so deep enemies still die in a few good hits.
 
 ## Size (reading the arena)
 

@@ -21,6 +21,15 @@ flutter test test/systems/upgrade_system_test.dart           # single file
 flutter test --name "substring of test description"          # single test by name
 ```
 
+Install on a physical phone without TestFlight (auto-picks the first
+cable/wireless device; runs analyze + test first):
+
+```bash
+./tool/deploy_phone.sh               # release build, installs and detaches
+./tool/deploy_phone.sh --debug       # stays attached for hot reload
+./tool/deploy_phone.sh -d <id> --skip-checks
+```
+
 Regenerate native splash after editing the `flutter_native_splash` block in
 `pubspec.yaml`:
 
@@ -56,6 +65,9 @@ The game is one `FlameGame` subclass with a Flutter overlay layer for menus/HUD.
   lifecycle, and persistence wiring. Key state:
   - `enum RunPhase { startMenu, loadout, playing, runOver, upgrading }` drives
     which overlays show; `bool get show…` getters expose phase to the UI.
+  - The campaign is `DungeonLevelGenerator.campaignFloorCount` (5) floors;
+    the Warden boss spawns on the last one, and clearing it ends the run with
+    `RunEndReason.victory` (HUD shows the VICTORY card).
   - `enum SpinnerGameMode { dungeon, invasion }` — two run types (procedural
     dungeon crawl vs. a space-invaders-style defense). `enum RunEndReason`
     records why a run ended.
@@ -64,6 +76,11 @@ The game is one `FlameGame` subclass with a Flutter overlay layer for menus/HUD.
     method rather than reading top-to-bottom. Private helper classes
     (`_LevelPlan`, `_RoomPlan`, `_GridPos`, `_ThemeSprites`, …) live at the
     bottom of the same file.
+
+- **Room props** — `SpinnerGame._spawnRoomProps` seeds per room: pinball
+  bumper sets (light all → jackpot chest), breakable `PillarComponent`s and
+  explosive `BarrelComponent`s (`dungeon_prop_components.dart`, both subclass
+  `BumperComponent`). Explosions go through `SpinnerGame.triggerExplosion`.
 
 - **`lib/game/` components** — Flame components for each entity
   (`spinner_component`, `enemy_component`, `coin_pickup_component`,
@@ -81,10 +98,19 @@ The game is one `FlameGame` subclass with a Flutter overlay layer for menus/HUD.
   is used by the CLI tool, so a seed reproduces identically in-game and offline.
   `dungeon_preview_renderer.dart` rasterizes a layout to PNG.
 
-- **Theming & tiles** — `dungeon_theme.dart`, `room_template*.dart`,
-  `tile_semantics.dart`, `semantic_theme_mapping.dart`, and the `ldtk/` bridge
-  load **semantic tile grids** (biome-agnostic IDs) and map each ID to per-theme
-  Wang-sheet art. See `docs/ldtk.md` for authoring rooms and the runtime order.
+- **Terrain rendering** — floors and walls are drawn procedurally as one vector
+  `ui.Picture` per level by `rendering/dungeon_terrain.dart` (hand-drawn
+  flagstones, chunky outlined wall tops, per-`DungeonTheme` `TerrainPalette`
+  mixed from `agent.md` hexes). No tile textures are used in-game; the Wang
+  sheets in `assets/images/dungeon/` are only used by tooling. Props (chest,
+  pit, spike trap) are likewise vector-drawn top-down in
+  `rendering/prop_painters.dart`; no prop PNGs are shipped.
+- **Room templates** — `room_template*.dart`, `tile_semantics.dart`, and the
+  `ldtk/` bridge load **semantic tile grids** (biome-agnostic IDs) that are
+  stretched over a room to spawn interior walls/pits/hazards. Cells near a
+  doorway are skipped. Assignment is gated by `kCombatRoomTemplatesEnabled`
+  (off: the only bundled template, `band_arena`, walled off doorways). See
+  `docs/ldtk.md` for authoring rooms.
 
 - **`lib/systems/`** — pure-ish logic, decoupled from Flame:
   - `upgrade_system.dart` — `MetaProgress`, upgrade/ability enums, leaderboard.
@@ -95,6 +121,9 @@ The game is one `FlameGame` subclass with a Flutter overlay layer for menus/HUD.
     (`MetaProgress` under `ssc_meta_progress_v1`, in-progress run under
     `ssc_run_snapshot_v1`). Inject fakes in tests.
   - `combat_system.dart`, `collision_system.dart` — small combat/collision helpers.
+  - `trick_shot_system.dart` — per-fling bank-shot / multi-kill rules,
+    the cross-fling `ComboTracker` (drains only while the spinner rests) and
+    `FloorPace` speed bonus vs par; unit-tested.
 
 - **`lib/ui/`** — Flutter (not Flame) overlays: `start_flow_overlay.dart` (start
   menu → loadout), `hud.dart`, `upgrade_menu.dart`, `hall_of_spinners_screen.dart`,

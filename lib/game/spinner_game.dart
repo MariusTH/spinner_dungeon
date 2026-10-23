@@ -1,7 +1,5 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:math';
-import 'dart:ui' as ui;
 
 import 'package:flame/components.dart';
 import 'package:flame/events.dart';
@@ -14,16 +12,19 @@ import '../input/spin_gesture_detector.dart';
 import '../systems/progression_repository.dart';
 import '../systems/run_snapshot_repository.dart';
 import '../systems/spinner_parts.dart';
+import '../systems/trick_shot_system.dart';
 import '../systems/upgrade_system.dart';
+import 'abyss_portal_component.dart';
 import 'bumper_component.dart';
 import 'chest_component.dart';
+import 'combo_ring_component.dart';
 import 'coin_pickup_component.dart';
 import 'dungeon_level_generator.dart';
+import 'dungeon_prop_components.dart';
 import 'dungeon_theme.dart';
 import 'room_template.dart';
 import 'room_template_catalog.dart';
 import 'semantic_hazard_rect.dart';
-import 'semantic_theme_mapping.dart';
 import 'tile_semantics.dart';
 import 'enemy_component.dart';
 import 'enemy_projectile_component.dart';
@@ -37,11 +38,7 @@ import 'tether_link_component.dart';
 import 'trap_component.dart';
 import 'wall_component.dart';
 import 'combat_fx_components.dart';
-
-/// Filled band behind [WallComponent] quads. Collision uses an invisible
-/// [RectangleComponent]; the drawn strip must stay legible when the wall
-/// upper-terrain sprite is missing, empty, or matches the floor tone.
-const Color _kWallVisualBackplate = Color(0xE627367B);
+import 'rendering/dungeon_terrain.dart';
 
 enum RunPhase { startMenu, loadout, playing, runOver, upgrading }
 
@@ -111,7 +108,8 @@ class SpinnerGame extends FlameGame
         DoubleTapDetector {
   SpinnerGame();
 
-  static const int _campaignLevelCount = 10;
+  static const int campaignFloorCount =
+      DungeonLevelGenerator.campaignFloorCount;
 
   /// Space-invader layout: spinner near bottom, walkers spawn above this inset.
   static const double _invasionSpinnerBottomInset = 86;
@@ -144,7 +142,6 @@ class SpinnerGame extends FlameGame
   static const double _damageInvulnerability = 0.45;
   static const double _damageAlertDuration = 1.15;
   static const double _pitPenaltyDamage = 18;
-  static const double _floorTileWorldSize = 16;
   static const double _minimumPitHoverSeconds = 0.02;
 
   /// Floor traps and pits are off for now (poor contrast + low fun).
@@ -180,32 +177,12 @@ class SpinnerGame extends FlameGame
       <EnemyProjectileComponent>[];
   final List<ChestComponent> _chests = <ChestComponent>[];
   final List<EnemyComponent> _enemies = <EnemyComponent>[];
-  final List<PositionComponent> _wallVisuals = <PositionComponent>[];
   final List<PositionComponent> _decorations = <PositionComponent>[];
   TetherLinkComponent? _tetherLink;
-  final Set<String> _floorCellKeys = <String>{};
-  final Map<DungeonTheme, _ThemeSprites> _themeSpriteMap =
-      <DungeonTheme, _ThemeSprites>{};
   DungeonTheme _activeTheme = DungeonTheme.templeWarm;
-  _ThemeSprites? _fallbackTheme;
 
-  SemanticThemeMapping? _semanticThemeMapping;
-  final List<PositionComponent> _semanticTileLayers = <PositionComponent>[];
   final List<SemanticHazardRectComponent> _semanticHazards =
       <SemanticHazardRectComponent>[];
-
-  _ThemeSprites? get _activeThemeSprites =>
-      _themeSpriteMap[_activeTheme] ?? _fallbackTheme;
-  List<Sprite> get _floorTileSprites =>
-      _activeThemeSprites?.floorTileSprites ?? const <Sprite>[];
-  Map<String, Sprite> get _wangTileSpritesByKey =>
-      _activeThemeSprites?.wangTileSpritesByKey ?? const <String, Sprite>{};
-  Sprite? get _lowerTerrainSprite => _activeThemeSprites?.lowerTerrainSprite;
-  Sprite? get _upperTerrainSprite => _activeThemeSprites?.upperTerrainSprite;
-  List<Sprite> get _wallTileSprites =>
-      _activeThemeSprites?.wallTileSprites ?? const <Sprite>[];
-  List<Sprite> get _openFloorTileSprites =>
-      _activeThemeSprites?.openFloorTileSprites ?? const <Sprite>[];
 
   final Map<EnemyComponent, _GridPos> _enemyRooms =
       <EnemyComponent, _GridPos>{};
@@ -271,6 +248,18 @@ class SpinnerGame extends FlameGame
   RunEndReason? _runEndReason;
   RunStats _runStats = const RunStats();
   int _killsThisSpin = 0;
+  final TrickShotTracker _trickShots = TrickShotTracker();
+  AbyssPortalComponent? _abyssPortal;
+  final ComboTracker _combo = ComboTracker();
+  ComboRingComponent? _comboRing;
+
+  /// Seconds spent on the current floor before it was cleared.
+  double _floorElapsed = 0;
+
+  /// Pinball bumper sets that already paid their jackpot this floor.
+  final Set<int> _jackpotGroupsPaid = <int>{};
+  final Set<ChestComponent> _jackpotChests = <ChestComponent>{};
+  int _nextBumperGroup = 0;
   MetaProgress _progress = MetaProgress.defaults();
   AppliedUpgrades _appliedUpgrades = const AppliedUpgrades();
   SpinnerBuild _selectedBuild = SpinnerPartCatalog.defaultBuild;
@@ -387,6 +376,11 @@ class SpinnerGame extends FlameGame
   int get deepestLevelReached => _progress.deepestLevelReached;
   List<LeaderboardEntry> get leaderboardEntries => _progress.leaderboard;
   int get spinChainKills => _killsThisSpin;
+  int get comboCount => _combo.count;
+  double get comboFraction => _combo.fraction;
+  double get floorElapsedSeconds => _floorElapsed;
+  double get floorParSeconds =>
+      FloorPace.parSeconds(_currentLevel?.rooms.length ?? 1);
   int get maxSpinChainThisRun => _runStats.maxSpinChain;
   bool get isInvasionMode => _gameMode == SpinnerGameMode.invasion;
   double get invasionElapsedSeconds => _invasionElapsed;
@@ -675,8 +669,54 @@ class SpinnerGame extends FlameGame
     return (zonesClearedInLevel / zonesInLevel).clamp(0, 1).toDouble();
   }
 
+  /// Combat rooms across the whole campaign (start rooms excluded).
+  int get campaignRoomsTotal => _levels.fold(
+    0,
+    (sum, level) =>
+        sum + level.rooms.values.where((r) => r.type != RoomType.start).length,
+  );
+
+  /// Rooms cleared so far this run, counting every floor already descended
+  /// from plus the current floor's cleared rooms.
+  int get campaignRoomsCleared {
+    var cleared = 0;
+    for (var i = 0; i < _levels.length && i <= _currentLevelIndex; i++) {
+      cleared += _levels[i].rooms.values
+          .where(
+            (r) =>
+                r.type != RoomType.start &&
+                (i < _currentLevelIndex || r.cleared),
+          )
+          .length;
+    }
+    return cleared;
+  }
+
+  double get campaignProgressRatio {
+    final total = campaignRoomsTotal;
+    return total <= 0
+        ? 0.0
+        : (campaignRoomsCleared / total).clamp(0, 1).toDouble();
+  }
+
+  bool get onWardenFloor =>
+      !isInvasionMode &&
+      (_currentLevel?.rooms.values.any((r) => r.bossCount > 0) ?? false);
+
+  /// The live Warden on this floor, if any — drives the HUD boss bar.
+  EnemyComponent? get activeWarden {
+    for (final enemy in _enemies) {
+      if (enemy.type == EnemyType.boss && !enemy.isDead) {
+        return enemy;
+      }
+    }
+    return null;
+  }
+
+  bool get runWon => _runEndReason == RunEndReason.victory;
+
   String get levelClearBannerText =>
-      'FLOOR CLEARED\nTap Continue to keep looting — descend whenever you\'re ready.';
+      'FLOOR CLEARED\nThe abyss is open — fling into it to descend.';
 
   String get runEndReasonLabel {
     switch (_runEndReason) {
@@ -739,18 +779,15 @@ class SpinnerGame extends FlameGame
   }
 
   double _roomScaleForLevelNumber(int levelNumber) {
-    final span = max(1, _campaignLevelCount - 1);
+    final span = max(1, campaignFloorCount - 1);
     final t = ((levelNumber - 1) / span).clamp(0, 1).toDouble();
     return _minRoomScale + ((_maxRoomScale - _minRoomScale) * t);
   }
 
   double _roomHeightForScale(double scale) => roomHeight * scale;
-  double _corridorWidthForScale(double scale) =>
-      corridorWidth * (0.75 + (scale * 0.25));
 
   double get _activeRoomScale => _currentLevel?.roomScale ?? 1.0;
   double get _activeRoomHeight => _roomHeightForScale(_activeRoomScale);
-  double get _activeCorridorWidth => _corridorWidthForScale(_activeRoomScale);
 
   bool get _canBootstrapRun {
     return _ready && _progressLoaded && _snapshotLoaded && !_bootstrappedRun;
@@ -820,9 +857,7 @@ class SpinnerGame extends FlameGame
   @override
   Future<void> onLoad() async {
     await super.onLoad();
-    await _loadDungeonTiles();
     await RoomTemplateCatalog.instance.ensureLoaded();
-    _semanticThemeMapping = await SemanticThemeMapping.load();
     _progress = await _progressRepository.load();
     _pendingRunSnapshot = await _runSnapshotRepository.load();
     _restoreSeedPreferencesFromSnapshot();
@@ -911,6 +946,7 @@ class SpinnerGame extends FlameGame
     _updateCameraZoom(dt);
     _tickRunSnapshotAutosave(dt);
     _tickInvasionMode(dt);
+    _tickComboAndPace(dt);
     _applyScreenShake(dt);
   }
 
@@ -1194,6 +1230,8 @@ class SpinnerGame extends FlameGame
     required bool enemyDefeated,
     required bool heavyHit,
     required Vector2 impactWorldPos,
+    String? hitLabel,
+    bool crit = false,
   }) {
     if (_runPhase != RunPhase.playing || _pausedByMenu) {
       return;
@@ -1223,6 +1261,18 @@ class SpinnerGame extends FlameGame
     final sparkIntensity =
         (damage / 40).clamp(0.75, 1.65) * (0.82 + impactSpeed / 1100);
     spawnImpactSparks(impactWorldPos, intensity: sparkIntensity);
+
+    // Name the skill check the player hit (or the armour they bounced off).
+    if (hitLabel != null) {
+      world.add(
+        TrickCalloutComponent(
+          position: impactWorldPos.clone(),
+          text: hitLabel,
+          color: crit ? const Color(0xFFFFE100) : const Color(0xFF919090),
+          fontSize: crit ? 18 : 15,
+        ),
+      );
+    }
   }
 
   void spawnImpactSparks(Vector2 worldPos, {double intensity = 1}) {
@@ -1302,6 +1352,7 @@ class SpinnerGame extends FlameGame
       return;
     }
     _killsThisSpin = 0;
+    _trickShots.onLaunch();
     _isCameraGestureActive = false;
     _isCameraDragActive = false;
     _attachCameraFollow(snap: false);
@@ -1327,14 +1378,29 @@ class SpinnerGame extends FlameGame
     };
     var chainMult = 1.0;
     if (spinnerMoving) {
-      _killsThisSpin++;
-      final chainIndex = (_killsThisSpin - 1).clamp(0, 12);
-      chainMult = 1.0 + 0.15 * chainIndex;
+      final trick = _trickShots.onKill();
+      _killsThisSpin = trick.chainIndex;
+      chainMult = trick.scoreMultiplier;
       _runStats = _runStats.copyWith(
         maxSpinChain: max(_runStats.maxSpinChain, _killsThisSpin),
       );
+      for (var i = 0; i < trick.callouts.length; i++) {
+        world.add(
+          TrickCalloutComponent(
+            position: enemy.position.clone(),
+            text: trick.callouts[i],
+            color: i == trick.callouts.length - 1
+                ? const Color(0xFFFFC83B)
+                : const Color(0xFFFF6A1F),
+            stack: i,
+          ),
+        );
+      }
+      _spawnCoinBurst(enemy.position.clone(), trick.bonusCoins);
     }
-    final adjustedKillScore = (killScore * chainMult).round();
+    final comboMult = _combo.multiplier;
+    _combo.onKill();
+    final adjustedKillScore = (killScore * chainMult * comboMult).round();
     _addScore(adjustedKillScore, depthScaled: true);
     _progress = _progress.copyWith(
       totalEnemiesDefeated: _progress.totalEnemiesDefeated + 1,
@@ -1400,6 +1466,11 @@ class SpinnerGame extends FlameGame
 
   void onChestOpened(ChestComponent chest) {
     if (_runPhase != RunPhase.playing) {
+      return;
+    }
+    if (_jackpotChests.remove(chest)) {
+      _spawnCoinBurst(chest.position.clone(), chest.coinReward);
+      _notifyHud();
       return;
     }
 
@@ -1629,6 +1700,10 @@ class SpinnerGame extends FlameGame
         startDelay: 0.34,
         fillDuration: 1.1,
         trackMuzzleWorld: centerWorld,
+        // An overloaded pulser drops its slam.
+        cancelWhen: telegraphOwner == null
+            ? null
+            : () => telegraphOwner.isDead || !telegraphOwner.isSlamCharging,
         canAdvanceTime: () => _runPhase == RunPhase.playing && !isWorldFrozen,
         priority: 22,
         outlineColor: const Color(0xF5D020FF),
@@ -1637,10 +1712,19 @@ class SpinnerGame extends FlameGame
           if (telegraphOwner != null && telegraphOwner.isDead) {
             return;
           }
+          telegraphOwner?.endSlamCharge();
           if (_runPhase != RunPhase.playing) {
             return;
           }
           final c = centerWorld();
+          // The slam also hurts other enemies caught in it.
+          for (final enemy in List<EnemyComponent>.of(_enemies)) {
+            if (enemy != telegraphOwner &&
+                !enemy.isDead &&
+                enemy.position.distanceTo(c) <= radius + enemy.radius) {
+              enemy.takeDamage(damage * 0.8);
+            }
+          }
           final sp = _spinner;
           if (sp == null) {
             return;
@@ -1909,7 +1993,7 @@ class SpinnerGame extends FlameGame
 
     _levels.clear();
 
-    for (var i = 0; i < _campaignLevelCount; i++) {
+    for (var i = 0; i < campaignFloorCount; i++) {
       _levels.add(_generateLevel(levelNumber: i + 1));
     }
 
@@ -2110,6 +2194,38 @@ class SpinnerGame extends FlameGame
     _levels.clear();
     _notifyHud();
     _persistRunSnapshot(force: true);
+  }
+
+  /// A wall or bumper bounce by the moving spinner (feeds bank shots).
+  void onSpinnerBanked() {
+    if (spinnerMoving) {
+      _trickShots.onBank();
+    }
+  }
+
+  void onSpinnerEnteredAbyss() {
+    tryAdvanceAfterLevelClear();
+  }
+
+  /// Opens the way down in the spinner's room, away from the spinner so
+  /// reaching it takes a deliberate fling.
+  void _spawnAbyssPortal() {
+    _abyssPortal?.removeFromParent();
+    final room = _currentRoom;
+    final spinner = _spinner;
+    if (room == null || room.worldRect == null) {
+      return;
+    }
+    var spot = room.center;
+    for (var attempt = 0; attempt < 12; attempt++) {
+      final candidate = _randomSpawnInRoom(room: room, radius: 52);
+      if (spinner == null || candidate.distanceTo(spinner.position) > 180) {
+        spot = candidate;
+        break;
+      }
+    }
+    _abyssPortal = AbyssPortalComponent(position: spot);
+    world.add(_abyssPortal!);
   }
 
   void tryAdvanceAfterLevelClear() {
@@ -2989,6 +3105,10 @@ class SpinnerGame extends FlameGame
     }
   }
 
+  /// HP grows more gently than other danger stats so deep enemies stay
+  /// killable in a few good hits (danger 0.72..3.0 -> HP x0.87..1.9).
+  double _enemyHpScale(double dangerScale) => 1 + (dangerScale - 1) * 0.45;
+
   double _enemyDangerScaleForTier(int tier) {
     final depthAdjusted = tier + _currentLevelIndex;
     return (0.72 + depthAdjusted * 0.11).clamp(0.72, 3.0).toDouble();
@@ -3558,11 +3678,14 @@ class SpinnerGame extends FlameGame
     _applyThemeForLevel(levelNumber);
     _layoutLevel(level);
     _buildLevelGeometry(level);
-    _spawnCenterBumpers(level);
+    _spawnRoomProps(level);
     _spawnLevelContent(level);
     _spawnSpinner(level);
     _spawnAbilityVisuals();
     _spawnQueuedDebugEnemiesForCurrentLevel();
+    _comboRing = ComboRingComponent();
+    world.add(_comboRing!);
+    _floorElapsed = 0;
 
     _isCharging = false;
     _spinDetector.reset();
@@ -3581,6 +3704,14 @@ class SpinnerGame extends FlameGame
   }
 
   void _clearActiveComponents() {
+    _abyssPortal?.removeFromParent();
+    _abyssPortal = null;
+    _comboRing?.removeFromParent();
+    _comboRing = null;
+    _combo.end();
+    _jackpotGroupsPaid.clear();
+    _jackpotChests.clear();
+    _nextBumperGroup = 0;
     _tetherLink?.removeFromParent();
     _tetherLink = null;
     _clearTetherLineVisual();
@@ -3597,15 +3728,10 @@ class SpinnerGame extends FlameGame
       floor.removeFromParent();
     }
     _floors.clear();
-    for (final layer in _semanticTileLayers) {
-      layer.removeFromParent();
-    }
-    _semanticTileLayers.clear();
     for (final h in _semanticHazards) {
       h.removeFromParent();
     }
     _semanticHazards.clear();
-    _floorCellKeys.clear();
 
     for (final wall in _walls) {
       wall.removeFromParent();
@@ -3616,11 +3742,6 @@ class SpinnerGame extends FlameGame
       bumper.removeFromParent();
     }
     _bumpers.clear();
-
-    for (final visual in _wallVisuals) {
-      visual.removeFromParent();
-    }
-    _wallVisuals.clear();
 
     for (final trap in _traps) {
       trap.removeFromParent();
@@ -3700,8 +3821,16 @@ class SpinnerGame extends FlameGame
     // Tile-occupancy mask of all walkable cells (rooms + corridors); the
     // perimeter walls are the outline of this mask.
     final floorTiles = <int>{};
+    final corridorTiles = <int>{};
+    final regions = <TerrainRegion>[];
 
-    void markBand(int txLo, int tyLo, int txHi, int tyHi) {
+    void markBand(
+      int txLo,
+      int tyLo,
+      int txHi,
+      int tyHi, {
+      bool corridor = false,
+    }) {
       final x0 = txLo.clamp(0, level.width - 1);
       final y0 = tyLo.clamp(0, level.height - 1);
       final x1 = txHi.clamp(0, level.width - 1);
@@ -3709,20 +3838,25 @@ class SpinnerGame extends FlameGame
       for (var ty = y0; ty <= y1; ty++) {
         for (var tx = x0; tx <= x1; tx++) {
           floorTiles.add(key(tx, ty));
+          if (corridor) {
+            corridorTiles.add(key(tx, ty));
+          }
         }
       }
-      _addFloorRect(
-        Rect.fromLTWH(
-          mapMargin + x0 * ts,
-          mapMargin + y0 * ts,
-          (x1 - x0 + 1) * ts,
-          (y1 - y0 + 1) * ts,
+      regions.add(
+        TerrainRegion(
+          Rect.fromLTWH(
+            mapMargin + x0 * ts,
+            mapMargin + y0 * ts,
+            (x1 - x0 + 1) * ts,
+            (y1 - y0 + 1) * ts,
+          ),
+          isCorridor: corridor,
         ),
       );
     }
 
     for (final room in level.rooms.values) {
-      _addFloorRect(room.worldRect!);
       markBand(
         room.tileX,
         room.tileY,
@@ -3735,9 +3869,21 @@ class SpinnerGame extends FlameGame
       final half = corridor.width ~/ 2;
       void segment(int x0, int y0, int x1, int y1) {
         if (y0 == y1) {
-          markBand(min(x0, x1), y0 - half, max(x0, x1), y0 + half);
+          markBand(
+            min(x0, x1) - half,
+            y0 - half,
+            max(x0, x1) + half,
+            y0 + half,
+            corridor: true,
+          );
         } else {
-          markBand(x0 - half, min(y0, y1), x0 + half, max(y0, y1));
+          markBand(
+            x0 - half,
+            min(y0, y1) - half,
+            x0 + half,
+            max(y0, y1) + half,
+            corridor: true,
+          );
         }
       }
 
@@ -3747,19 +3893,40 @@ class SpinnerGame extends FlameGame
 
     _addFloorMaskWalls(floorTiles: floorTiles, stride: stride, tileSize: ts);
 
+    // Doorways: corridor tiles that sink into a room.
     for (final room in level.rooms.values) {
-      _applySemanticRoomTemplateIfPresent(room);
+      room.doorways.clear();
+      for (var ty = room.tileY; ty < room.tileY + room.tileH; ty++) {
+        for (var tx = room.tileX; tx < room.tileX + room.tileW; tx++) {
+          if (corridorTiles.contains(key(tx, ty))) {
+            room.doorways.add(
+              Rect.fromLTWH(mapMargin + tx * ts, mapMargin + ty * ts, ts, ts),
+            );
+          }
+        }
+      }
     }
 
-    _rebuildFloorTilesFromWang();
-    if (_floors.isNotEmpty) {
-      world.addAll(_floors);
+    final blocks = <Rect>[];
+    for (final room in level.rooms.values) {
+      _applySemanticRoomTemplateIfPresent(room, tileSize: ts, blocks: blocks);
     }
+
+    _floors.add(
+      DungeonTerrainComponent(
+        picture: paintDungeonTerrain(
+          regions: regions,
+          palette: TerrainPalette.forTheme(_activeTheme),
+          seed: (_activeRunSeed ?? 0) ^ (levelNumber * 7919),
+          wallInset: wallThickness / 2,
+          wallOutset: 26,
+          blocks: blocks,
+        ),
+      ),
+    );
+    world.addAll(_floors);
     if (_walls.isNotEmpty) {
       world.addAll(_walls);
-    }
-    if (_wallVisuals.isNotEmpty) {
-      world.addAll(_wallVisuals);
     }
     if (_decorations.isNotEmpty) {
       world.addAll(_decorations);
@@ -3870,23 +4037,26 @@ class SpinnerGame extends FlameGame
     );
   }
 
-  /// Paints semantic tile overlays and spawns interior walls / pits / hurt rects
-  /// from [RoomTemplateCatalog] when [room.roomTemplateId] is set.
-  void _applySemanticRoomTemplateIfPresent(_RoomPlan room) {
+  /// Spawns interior walls / pits / hurt rects from [RoomTemplateCatalog]
+  /// when [room.roomTemplateId] is set, adding solid cells to [blocks] for the
+  /// terrain painter. Cells near one of [_RoomPlan.doorways] are skipped so a
+  /// template can never seal a corridor entrance.
+  void _applySemanticRoomTemplateIfPresent(
+    _RoomPlan room, {
+    required double tileSize,
+    required List<Rect> blocks,
+  }) {
     final templateId = room.roomTemplateId;
     final rect = room.worldRect;
     if (templateId == null || rect == null) {
       return;
     }
     final template = RoomTemplateCatalog.instance.byId(templateId);
-    final mapping = _semanticThemeMapping;
-    if (template == null || mapping == null) {
+    if (template == null) {
       return;
     }
-    final sprites = _floorTileSprites;
-    if (sprites.isEmpty) {
-      return;
-    }
+
+    final doorways = [for (final d in room.doorways) d.inflate(tileSize * 1.5)];
 
     final transformed = applyTemplateTransform(
       template,
@@ -3905,30 +4075,20 @@ class SpinnerGame extends FlameGame
     final cellW = rect.width / cols;
     final cellH = rect.height / rows;
 
-    final overlay = PositionComponent(priority: -88);
     for (var y = 0; y < rows; y++) {
       for (var x = 0; x < cols; x++) {
         final idx = y * cols + x;
         final s = sem[idx];
         final cx = rect.left + (x + 0.5) * cellW;
         final cy = rect.top + (y + 0.5) * cellH;
-
-        final isWallCell = TileSemantics.createsSolidWall(s);
-        final wallSprites = _wallTileSprites;
-        final sprite = isWallCell && wallSprites.isNotEmpty
-            ? wallSprites[(((x * 83492791) ^ (y * 1234559)) & 0x7fffffff) %
-                  wallSprites.length]
-            : mapping.spriteForSemantic(sprites, s);
-        if (sprite != null) {
-          overlay.add(
-            SpriteComponent(
-              sprite: sprite,
-              position: Vector2(cx, cy),
-              size: Vector2(cellW, cellH),
-              anchor: Anchor.center,
-              priority: -88,
-            ),
-          );
+        final cellRect = Rect.fromCenter(
+          center: Offset(cx, cy),
+          width: cellW,
+          height: cellH,
+        );
+        if (s != TileSemantics.floor &&
+            doorways.any((d) => d.overlaps(cellRect))) {
+          continue;
         }
 
         if (TileSemantics.isPit(s)) {
@@ -3946,6 +4106,7 @@ class SpinnerGame extends FlameGame
             size: Vector2(cellW, cellH),
           );
           _walls.add(wall);
+          blocks.add(cellRect);
         }
 
         var hurtTier = 0;
@@ -3969,37 +4130,302 @@ class SpinnerGame extends FlameGame
         }
       }
     }
-    _semanticTileLayers.add(overlay);
-    world.add(overlay);
   }
 
-  void _spawnCenterBumpers(_LevelPlan level) {
+  /// Spawns per-room props: pinball bumper sets, breakable pillars and
+  /// explosive barrels. Placement is seeded per room so a restored run gets
+  /// the same layout; cleared rooms come back with lit bumpers and no barrels.
+  void _spawnRoomProps(_LevelPlan level) {
+    final props = <BumperComponent>[];
+    bool clear(Vector2 p, double r, _RoomPlan room) {
+      if (_blocksDoorLane(room, p, r)) {
+        return false;
+      }
+      for (final other in props) {
+        if (p.distanceTo(other.position) < r + other.radius + 46) {
+          return false;
+        }
+      }
+      return true;
+    }
+
     for (final room in level.rooms.values) {
-      if (room.type == RoomType.start || !room.hasCenterBumper) {
+      final worldRect = room.worldRect;
+      if (room.type == RoomType.start || worldRect == null) {
         continue;
       }
-
-      final radius = (15 + room.dangerTier * 0.45).clamp(14, 23).toDouble();
-      final boost = (1.12 + room.dangerTier * 0.014)
-          .clamp(1.12, 1.3)
-          .toDouble();
-      final controlLoss = (0.24 + room.dangerTier * 0.014)
-          .clamp(0.24, 0.62)
-          .toDouble();
-      final bumper = BumperComponent(
-        position: room.center,
-        radius: radius,
-        boostMultiplier: boost,
-        controlLossRadians: controlLoss,
+      final rng = Random(
+        Object.hash(
+          _activeRunSeed,
+          _currentLevelIndex,
+          room.position.x,
+          room.position.y,
+        ),
       );
-      _bumpers.add(bumper);
-      world.add(bumper);
+      final area = worldRect.deflate(80);
+      final center = room.center;
+
+      // Pinball set: light every bumper to pop a jackpot chest.
+      final wantsSet =
+          room.hasCenterBumper ||
+          (levelNumber >= 2 && room.bossCount <= 0 && rng.nextDouble() < 0.35);
+      if (wantsSet && area.shortestSide > 160) {
+        final radius = (15 + room.dangerTier * 0.45).clamp(14, 23).toDouble();
+        final boost = (1.12 + room.dangerTier * 0.014)
+            .clamp(1.12, 1.3)
+            .toDouble();
+        final controlLoss = (0.24 + room.dangerTier * 0.014)
+            .clamp(0.24, 0.62)
+            .toDouble();
+        final count = 3 + rng.nextInt(3);
+        final ringR = min(area.shortestSide * 0.3, 120.0);
+        final spin = rng.nextDouble() * pi * 2;
+        final group = _nextBumperGroup++;
+        if (room.cleared) {
+          _jackpotGroupsPaid.add(group);
+        }
+        for (var i = 0; i < count; i++) {
+          final a = spin + i * 2 * pi / count;
+          final bumper = BumperComponent(
+            position: center + Vector2(cos(a), sin(a)) * ringR,
+            radius: radius,
+            boostMultiplier: boost,
+            controlLossRadians: controlLoss,
+            groupId: group,
+            lit: room.cleared,
+          );
+          props.add(bumper);
+        }
+      }
+
+      // Breakable pillars at the room's quarter points.
+      if (levelNumber >= 2 &&
+          area.width > 300 &&
+          area.height > 300 &&
+          rng.nextDouble() < 0.6) {
+        final four = rng.nextBool();
+        final spots = <Vector2>[
+          Vector2(area.left + area.width * 0.25, area.top + area.height * 0.3),
+          Vector2(
+            area.right - area.width * 0.25,
+            area.bottom - area.height * 0.3,
+          ),
+          if (four) ...[
+            Vector2(
+              area.right - area.width * 0.25,
+              area.top + area.height * 0.3,
+            ),
+            Vector2(
+              area.left + area.width * 0.25,
+              area.bottom - area.height * 0.3,
+            ),
+          ],
+        ];
+        for (final spot in spots) {
+          if (clear(spot, 20, room)) {
+            props.add(PillarComponent(position: spot));
+          }
+        }
+      }
+
+      // Explosive barrels, preferring spots near enemies' likely paths.
+      if (levelNumber >= 2 && !room.cleared && room.type != RoomType.treasure) {
+        final count = 1 + rng.nextInt(3);
+        var placed = 0;
+        for (var attempt = 0; attempt < 16 && placed < count; attempt++) {
+          final spot = Vector2(
+            area.left + rng.nextDouble() * area.width,
+            area.top + rng.nextDouble() * area.height,
+          );
+          if (spot.distanceTo(center) < 70 || !clear(spot, 15, room)) {
+            continue;
+          }
+          props.add(BarrelComponent(position: spot));
+          placed++;
+        }
+      }
     }
+
+    _bumpers.addAll(props);
+    if (props.isNotEmpty) {
+      world.addAll(props);
+    }
+  }
+
+  /// Damages enemies and props around [center]; barrels in range chain.
+  void triggerExplosion({
+    required Vector2 center,
+    required double radius,
+    required double damage,
+    EnemyComponent? exclude,
+  }) {
+    if (_runPhase != RunPhase.playing) {
+      return;
+    }
+    world.add(ExplosionFxComponent(position: center.clone(), radius: radius));
+    world.add(
+      TrickCalloutComponent(
+        position: center.clone(),
+        text: 'BOOM!',
+        color: const Color(0xFFFF6A1F),
+        fontSize: 24,
+      ),
+    );
+    addScreenShake(11);
+    _hitStopRemaining = max(_hitStopRemaining, 0.06);
+
+    for (final enemy in List<EnemyComponent>.of(_enemies)) {
+      if (enemy == exclude || enemy.isDead) {
+        continue;
+      }
+      final offset = enemy.position - center;
+      final dist = offset.length;
+      if (dist > radius + enemy.radius) {
+        continue;
+      }
+      final falloff = 1 - 0.5 * (dist / radius).clamp(0.0, 1.0);
+      enemy.takeDamage(damage * falloff);
+      if (dist > 0) {
+        enemy.addImpulse(offset / dist * (280 * falloff));
+      }
+    }
+    for (final prop in List<BumperComponent>.of(_bumpers)) {
+      final dist = prop.position.distanceTo(center);
+      if (dist > radius + prop.radius) {
+        continue;
+      }
+      if (prop is PillarComponent) {
+        prop.takeDamage(damage * 0.8);
+      } else if (prop is BarrelComponent && !prop.isExploded) {
+        prop.explode(delay: 0.09);
+      }
+    }
+  }
+
+  /// A pillar shattered or a barrel went off.
+  void onPropDestroyed(BumperComponent prop) {
+    if (!_bumpers.remove(prop)) {
+      return;
+    }
+    prop.removeFromParent();
+    if (prop is PillarComponent) {
+      spawnImpactSparks(prop.position.clone(), intensity: 1.4);
+      world.add(
+        TrickCalloutComponent(
+          position: prop.position.clone(),
+          text: 'SMASH!',
+          color: const Color(0xFFF1E2C4),
+          fontSize: 18,
+        ),
+      );
+      addScreenShake(6);
+      _addScore(15, depthScaled: true);
+      _spawnCoinBurst(prop.position.clone(), 1);
+    }
+  }
+
+  /// A pinball bumper lit up; lighting a whole set pops a jackpot chest.
+  void onBumperLit(BumperComponent bumper) {
+    final group = bumper.groupId;
+    if (group == null || _jackpotGroupsPaid.contains(group)) {
+      return;
+    }
+    _addScore(10, depthScaled: false);
+    final set = _bumpers.where((b) => b.groupId == group).toList();
+    if (set.any((b) => !b.lit)) {
+      return;
+    }
+    _jackpotGroupsPaid.add(group);
+    final centroid =
+        set.fold(Vector2.zero(), (sum, b) => sum + b.position) /
+        set.length.toDouble();
+    final chest = ChestComponent(
+      position: centroid,
+      coinReward: 6 + levelNumber * 2,
+    );
+    _chests.add(chest);
+    _jackpotChests.add(chest);
+    world.add(chest);
+    world.add(
+      TrickCalloutComponent(
+        position: centroid.clone(),
+        text: 'JACKPOT!',
+        color: const Color(0xFFFFE100),
+        fontSize: 26,
+      ),
+    );
+    addScreenShake(7);
+    _addScore(120, depthScaled: true);
+    _notifyHud();
+  }
+
+  void _tickComboAndPace(double dt) {
+    if (_runPhase != RunPhase.playing || isInvasionMode) {
+      return;
+    }
+    if (!_levelComplete) {
+      final before = _floorElapsed.floor();
+      _floorElapsed += dt;
+      // The HUD only rebuilds on notify; tick it once per second.
+      if (_floorElapsed.floor() != before) {
+        _notifyHud();
+      }
+    }
+    final ended = _combo.tick(dt, draining: !spinnerMoving);
+    if (ended != null) {
+      _payoutCombo(ended);
+    }
+  }
+
+  void _payoutCombo(int size) {
+    final coins = ComboTracker.payoutCoins(size);
+    if (coins <= 0) {
+      return;
+    }
+    final at = _spinner?.position.clone();
+    if (at != null) {
+      world.add(
+        TrickCalloutComponent(
+          position: at,
+          text: 'COMBO x$size!',
+          color: const Color(0xFFFFC83B),
+          fontSize: 22,
+        ),
+      );
+      _spawnCoinBurst(at, coins);
+    }
+    _addScore(size * 12, depthScaled: true);
+    _notifyHud();
+  }
+
+  /// Speed bonus for clearing the floor under par.
+  void _awardFloorPace() {
+    final tier = FloorPace.tierFor(
+      elapsedSeconds: _floorElapsed,
+      roomCount: _currentLevel?.rooms.length ?? 1,
+    );
+    final label = FloorPace.label(tier);
+    final at = _spinner?.position.clone();
+    if (label == null || at == null) {
+      return;
+    }
+    world.add(
+      TrickCalloutComponent(
+        position: at,
+        text: label,
+        color: tier == FloorPaceTier.blazing
+            ? const Color(0xFFFFE100)
+            : const Color(0xFFFF6A1F),
+        fontSize: 24,
+        stack: 1,
+      ),
+    );
+    _spawnCoinBurst(at, FloorPace.bonusCoins(tier, levelNumber));
+    _addScore(tier == FloorPaceTier.blazing ? 300 : 120, depthScaled: true);
   }
 
   void _spawnLevelContent(_LevelPlan level) {
     final spawnablePowerupRooms = <_RoomPlan>[];
-    var carvedFloorForPits = false;
 
     for (final room in level.rooms.values) {
       if (room.type == RoomType.start) {
@@ -4017,7 +4443,7 @@ class SpinnerGame extends FlameGame
         final enemy = EnemyComponent.turret(
           position: _randomSpawnInRoom(room: room, radius: 18),
           archetype: _archetypeForSpawn(type: EnemyType.turret, room: room),
-          hpMultiplier: dangerScale * eliteScale,
+          hpMultiplier: _enemyHpScale(dangerScale) * eliteScale,
           contactDamageMultiplier: 0.9 + dangerScale * 0.2,
           fireRateMultiplier: 0.92 + dangerScale * 0.18,
           projectileDamageMultiplier: 0.9 + dangerScale * 0.22,
@@ -4057,9 +4483,10 @@ class SpinnerGame extends FlameGame
           ),
           direction: direction,
           archetype: walkerArchetype,
-          hpMultiplier: (dangerScale * eliteScale * walkerHpScale)
-              .clamp(0.8, 3.8)
-              .toDouble(),
+          hpMultiplier:
+              (_enemyHpScale(dangerScale) * eliteScale * walkerHpScale)
+                  .clamp(0.8, 3.8)
+                  .toDouble(),
           speedMultiplier:
               (0.88 + dangerScale * 0.16).clamp(0.8, 2.4).toDouble() *
               stalkerSpeed,
@@ -4093,7 +4520,7 @@ class SpinnerGame extends FlameGame
           ),
           direction: direction,
           archetype: _archetypeForSpawn(type: EnemyType.hedgehog, room: room),
-          hpMultiplier: (dangerScale * eliteScale * 1.08)
+          hpMultiplier: (_enemyHpScale(dangerScale) * eliteScale * 1.08)
               .clamp(0.8, 4.2)
               .toDouble(),
           speedMultiplier: (0.82 + dangerScale * 0.14)
@@ -4123,7 +4550,7 @@ class SpinnerGame extends FlameGame
           ),
           direction: direction,
           archetype: _archetypeForSpawn(type: EnemyType.pulser, room: room),
-          hpMultiplier: (dangerScale * eliteScale * 1.02)
+          hpMultiplier: (_enemyHpScale(dangerScale) * eliteScale * 1.02)
               .clamp(0.85, 3.9)
               .toDouble(),
           speedMultiplier: (0.82 + dangerScale * 0.12)
@@ -4164,7 +4591,9 @@ class SpinnerGame extends FlameGame
             avoidDoorLanes: true,
           ),
           archetype: _archetypeForSpawn(type: EnemyType.paddle, room: room),
-          hpMultiplier: (dangerScale * 0.95).clamp(0.8, 3.6).toDouble(),
+          hpMultiplier: (_enemyHpScale(dangerScale) * 0.95)
+              .clamp(0.8, 3.6)
+              .toDouble(),
           contactDamageMultiplier: (0.92 + dangerScale * 0.12)
               .clamp(0.8, 2.2)
               .toDouble(),
@@ -4197,8 +4626,6 @@ class SpinnerGame extends FlameGame
           );
           _pits.add(pit);
           world.add(pit);
-          carvedFloorForPits =
-              _carveFloorCellsForPit(pit) || carvedFloorForPits;
         }
       }
 
@@ -4224,10 +4651,6 @@ class SpinnerGame extends FlameGame
       );
       _powerups.add(powerup);
       world.add(powerup);
-    }
-
-    if (carvedFloorForPits) {
-      _refreshFloorVisualsFromCells();
     }
   }
 
@@ -4403,12 +4826,14 @@ class SpinnerGame extends FlameGame
         levelsCleared: _runStats.levelsCleared + 1,
       );
       _addScore(220, depthScaled: true);
+      _awardFloorPace();
 
       if (_currentLevelIndex == _levels.length - 1) {
         _addScore(500, depthScaled: true);
         _endRun(RunEndReason.victory);
         return;
       }
+      _spawnAbyssPortal();
     }
 
     if (notify) {
@@ -4420,443 +4845,10 @@ class SpinnerGame extends FlameGame
     return camera.globalToLocal(widgetPoint.clone());
   }
 
-  void _addFloorRect(Rect rect) {
-    final startX = (rect.left / _floorTileWorldSize).floor();
-    final endX = (rect.right / _floorTileWorldSize).ceil();
-    final startY = (rect.top / _floorTileWorldSize).floor();
-    final endY = (rect.bottom / _floorTileWorldSize).ceil();
-
-    for (var y = startY; y < endY; y++) {
-      for (var x = startX; x < endX; x++) {
-        _floorCellKeys.add(_cellKey(x, y));
-      }
-    }
-  }
-
-  bool _carveFloorCellsForPit(PitComponent pit) {
-    if (_floorCellKeys.isEmpty) {
-      return false;
-    }
-
-    final carveRadius = pit.radius + (_floorTileWorldSize * 0.15);
-    final startX = ((pit.position.x - carveRadius) / _floorTileWorldSize)
-        .floor();
-    final endX = ((pit.position.x + carveRadius) / _floorTileWorldSize).ceil();
-    final startY = ((pit.position.y - carveRadius) / _floorTileWorldSize)
-        .floor();
-    final endY = ((pit.position.y + carveRadius) / _floorTileWorldSize).ceil();
-
-    var removedAny = false;
-    for (var y = startY; y <= endY; y++) {
-      for (var x = startX; x <= endX; x++) {
-        final centerX = (x * _floorTileWorldSize) + (_floorTileWorldSize * 0.5);
-        final centerY = (y * _floorTileWorldSize) + (_floorTileWorldSize * 0.5);
-        final dx = centerX - pit.position.x;
-        final dy = centerY - pit.position.y;
-        if ((dx * dx) + (dy * dy) > carveRadius * carveRadius) {
-          continue;
-        }
-        removedAny = _floorCellKeys.remove(_cellKey(x, y)) || removedAny;
-      }
-    }
-
-    return removedAny;
-  }
-
-  void _refreshFloorVisualsFromCells() {
-    for (final floor in _floors) {
-      floor.removeFromParent();
-    }
-    _rebuildFloorTilesFromWang();
-    if (_floors.isNotEmpty) {
-      world.addAll(_floors);
-    }
-  }
-
-  void _addWallVisualForBounds({required Rect rect, required bool vertical}) {
-    final container = PositionComponent(priority: -90);
-    // Always add a backplate: wall sprites prefer [upperTerrainSprite], which in
-    // some themed exports is blank or the same albedo as floor—players then see
-    // only collision, not the obstacle.
-    container.add(
-      RectangleComponent(
-        position: Vector2(rect.center.dx, rect.center.dy),
-        size: Vector2(rect.width, rect.height),
-        anchor: Anchor.center,
-        paint: Paint()..color = _kWallVisualBackplate,
-        priority: -91,
-      ),
-    );
-
-    final wallSprites = _wallTileSprites;
-    if (wallSprites.isNotEmpty || _floorTileSprites.isNotEmpty) {
-      final startX = (rect.left / _floorTileWorldSize).floor();
-      final endX = (rect.right / _floorTileWorldSize).ceil();
-      final startY = (rect.top / _floorTileWorldSize).floor();
-      final endY = (rect.bottom / _floorTileWorldSize).ceil();
-
-      for (var y = startY; y < endY; y++) {
-        for (var x = startX; x < endX; x++) {
-          final variant = ((x * 83492791) ^ (y * 1234559)) & 0x7fffffff;
-          final Sprite sprite;
-          if (wallSprites.isNotEmpty) {
-            // Dedicated, visually-distinct wall art — read as an obstacle
-            // instead of blending with floor tiles.
-            sprite = wallSprites[variant % wallSprites.length];
-          } else {
-            final spriteIndices = vertical
-                ? const <int>[12, 13, 14, 15]
-                : const <int>[8, 9, 10, 11];
-            sprite =
-                _upperTerrainSprite ??
-                _floorTileSprites[spriteIndices[variant %
-                    spriteIndices.length]];
-          }
-          final centerX =
-              (x * _floorTileWorldSize) + (_floorTileWorldSize * 0.5);
-          final centerY =
-              (y * _floorTileWorldSize) + (_floorTileWorldSize * 0.5);
-          container.add(
-            SpriteComponent(
-              sprite: sprite,
-              position: Vector2(centerX, centerY),
-              size: Vector2.all(_floorTileWorldSize),
-              anchor: Anchor.center,
-              priority: -90,
-            ),
-          );
-        }
-      }
-    }
-
-    _wallVisuals.add(container);
-  }
-
-  Future<void> _loadDungeonTiles() async {
-    _themeSpriteMap.clear();
-    _fallbackTheme = null;
-
-    for (final asset in kDungeonThemeAssets) {
-      final loaded = await _loadThemeTileset(asset);
-      if (loaded != null) {
-        _themeSpriteMap[asset.theme] = loaded;
-        _fallbackTheme ??= loaded;
-      }
-    }
-
-    // If none of the new themed tilesets shipped yet, fall back to the
-    // legacy temple tileset so existing builds keep rendering.
-    if (_themeSpriteMap.isEmpty) {
-      final legacy = await _loadThemeTileset(kLegacyTempleTheme);
-      if (legacy != null) {
-        _themeSpriteMap[DungeonTheme.templeWarm] = legacy;
-        _fallbackTheme = legacy;
-      }
-    }
-  }
-
-  Future<_ThemeSprites?> _loadThemeTileset(DungeonThemeAssets asset) async {
-    try {
-      final image = await images.load(asset.pngAsset);
-      // Wang tilesets always ship as a 4×4 grid, so tile size is imageWidth/4.
-      final tileWidth = image.width / 4;
-      final tileHeight = image.height / 4;
-      if (tileWidth <= 0 || tileHeight <= 0) {
-        return null;
-      }
-
-      final floorTileSprites = <Sprite>[];
-      for (var row = 0; row < 4; row++) {
-        for (var col = 0; col < 4; col++) {
-          floorTileSprites.add(
-            Sprite(
-              image,
-              srcPosition: Vector2(col * tileWidth, row * tileHeight),
-              srcSize: Vector2(tileWidth, tileHeight),
-            ),
-          );
-        }
-      }
-
-      final wangTileSpritesByKey = <String, Sprite>{};
-      Sprite? lowerTerrainSprite;
-      Sprite? upperTerrainSprite;
-
-      try {
-        final metadataRaw = await rootBundle.loadString(asset.jsonAsset);
-        final metadata = jsonDecode(metadataRaw);
-        final tilesRaw = switch (metadata) {
-          Map() when metadata['tiles'] is List => metadata['tiles'] as List,
-          Map()
-              when metadata['tileset_data'] is Map &&
-                  (metadata['tileset_data'] as Map)['tiles'] is List =>
-            ((metadata['tileset_data'] as Map)['tiles'] as List),
-          _ => const <dynamic>[],
-        };
-        for (final tile in tilesRaw) {
-          if (tile is! Map) {
-            continue;
-          }
-          final cornersRaw = tile['corners'];
-          final bboxRaw = tile['bounding_box'];
-          if (cornersRaw is! Map || bboxRaw is! Map) {
-            continue;
-          }
-          final x = (bboxRaw['x'] as num?)?.toInt() ?? 0;
-          final y = (bboxRaw['y'] as num?)?.toInt() ?? 0;
-          final col = (x / tileWidth).floor();
-          final row = (y / tileHeight).floor();
-          if (col < 0 || col > 3 || row < 0 || row > 3) {
-            continue;
-          }
-          final spriteIndex = row * 4 + col;
-          if (spriteIndex < 0 || spriteIndex >= floorTileSprites.length) {
-            continue;
-          }
-          final sprite = floorTileSprites[spriteIndex];
-          final nwLower = (cornersRaw['NW'] as String?) == 'lower';
-          final neLower = (cornersRaw['NE'] as String?) == 'lower';
-          final swLower = (cornersRaw['SW'] as String?) == 'lower';
-          final seLower = (cornersRaw['SE'] as String?) == 'lower';
-          final key = _wangKey(
-            nw: nwLower,
-            ne: neLower,
-            sw: swLower,
-            se: seLower,
-          );
-          wangTileSpritesByKey[key] = sprite;
-
-          final allLower = nwLower && neLower && swLower && seLower;
-          final allUpper = !nwLower && !neLower && !swLower && !seLower;
-          if (allLower) {
-            lowerTerrainSprite = sprite;
-          } else if (allUpper) {
-            upperTerrainSprite = sprite;
-          }
-        }
-      } catch (_) {
-        // JSON is optional — without it we still render random floor variation
-        // from the 16-tile grid, just without precise corner matching.
-      }
-
-      final wallTileSprites = await _loadWallTileSprites(asset.wallPngAsset);
-      final openFloorTileSprites = await _loadTileStrip(
-        asset.openFloorPngAsset,
-        kOpenFloorVariantCount,
-      );
-
-      return _ThemeSprites(
-        image: image,
-        floorTileSprites: floorTileSprites,
-        wangTileSpritesByKey: wangTileSpritesByKey,
-        lowerTerrainSprite: lowerTerrainSprite,
-        upperTerrainSprite: upperTerrainSprite,
-        wallTileSprites: wallTileSprites,
-        openFloorTileSprites: openFloorTileSprites,
-      );
-    } catch (_) {
-      return null;
-    }
-  }
-
-  /// Loads a dedicated, seamlessly-tileable wall texture if the theme ships
-  /// one. Returns an empty list when [wallPngAsset] is null or fails to
-  /// load, so callers can fall back to reusing floor art.
-  Future<List<Sprite>> _loadWallTileSprites(String? wallPngAsset) async {
-    if (wallPngAsset == null) {
-      return const <Sprite>[];
-    }
-    try {
-      final image = await images.load(wallPngAsset);
-      if (image.width <= 0 || image.height <= 0) {
-        return const <Sprite>[];
-      }
-      return <Sprite>[Sprite(image)];
-    } catch (_) {
-      return const <Sprite>[];
-    }
-  }
-
-  /// Loads [count] equal-width square tiles packed side by side in one strip
-  /// image. Returns an empty list when [path] is null or fails to load.
-  Future<List<Sprite>> _loadTileStrip(String? path, int count) async {
-    if (path == null || count <= 0) {
-      return const <Sprite>[];
-    }
-    try {
-      final image = await images.load(path);
-      final tileWidth = image.width / count;
-      final tileHeight = image.height.toDouble();
-      if (tileWidth <= 0 || tileHeight <= 0) {
-        return const <Sprite>[];
-      }
-      return <Sprite>[
-        for (var i = 0; i < count; i++)
-          Sprite(
-            image,
-            srcPosition: Vector2(i * tileWidth, 0),
-            srcSize: Vector2(tileWidth, tileHeight),
-          ),
-      ];
-    } catch (_) {
-      return const <Sprite>[];
-    }
-  }
-
   /// Called right before a level is built so floor and wall rendering use the
   /// art that matches the current depth.
   void _applyThemeForLevel(int levelNumber) {
-    final target = themeForLevel(levelNumber);
-    if (_themeSpriteMap.containsKey(target)) {
-      _activeTheme = target;
-    } else if (_fallbackTheme != null) {
-      // Theme isn't shipped yet — keep using the first available theme so the
-      // biome still renders something cohesive instead of failing silently.
-      _activeTheme = _themeSpriteMap.keys.first;
-    }
-  }
-
-  int _tileIndexForGrid(int x, int y) {
-    final seed = ((x * 73856093) ^ (y * 19349663)) & 0x7fffffff;
-    return seed % _floorTileSprites.length;
-  }
-
-  void _rebuildFloorTilesFromWang() {
-    _floors.clear();
-
-    if (_floorCellKeys.isEmpty) {
-      return;
-    }
-
-    if (_floorTileSprites.isEmpty) {
-      _addFallbackFloorRect();
-      return;
-    }
-
-    final bounds = _floorCellBounds();
-    final container = PositionComponent(priority: -100);
-    for (var y = bounds.$2 - 1; y <= bounds.$4 + 1; y++) {
-      for (var x = bounds.$1 - 1; x <= bounds.$3 + 1; x++) {
-        if (!_isFloorCell(x, y) && !_hasNeighborFloorCell(x, y)) {
-          continue;
-        }
-
-        final nw = _vertexIsLower(x, y);
-        final ne = _vertexIsLower(x + 1, y);
-        final sw = _vertexIsLower(x, y + 1);
-        final se = _vertexIsLower(x + 1, y + 1);
-        if (!nw && !ne && !sw && !se) {
-          continue;
-        }
-
-        final openFloorSprites = _openFloorTileSprites;
-        final Sprite sprite;
-        if (nw && ne && sw && se && openFloorSprites.isNotEmpty) {
-          // Fully-interior cell, no wall/path edge nearby — the plain Wang
-          // tile repeats identically here across large open rooms and reads
-          // as a visible grid. Break it up with a varied, seamless tile.
-          final variant = ((x * 83492791) ^ (y * 1234559)) & 0x7fffffff;
-          sprite = openFloorSprites[variant % openFloorSprites.length];
-        } else {
-          sprite =
-              _wangTileSpritesByKey[_wangKey(nw: nw, ne: ne, sw: sw, se: se)] ??
-              _wangTileSpritesByKey[_wangKey(
-                nw: true,
-                ne: true,
-                sw: true,
-                se: true,
-              )] ??
-              _lowerTerrainSprite ??
-              _floorTileSprites[_tileIndexForGrid(x, y)];
-        }
-        final centerX = (x * _floorTileWorldSize) + (_floorTileWorldSize * 0.5);
-        final centerY = (y * _floorTileWorldSize) + (_floorTileWorldSize * 0.5);
-        container.add(
-          SpriteComponent(
-            sprite: sprite,
-            position: Vector2(centerX, centerY),
-            size: Vector2.all(_floorTileWorldSize),
-            anchor: Anchor.center,
-            priority: -100,
-          ),
-        );
-      }
-    }
-    _floors.add(container);
-  }
-
-  void _addFallbackFloorRect() {
-    final container = PositionComponent(priority: -100);
-    for (final key in _floorCellKeys) {
-      final (x, y) = _parseCellKey(key);
-      final centerX = (x * _floorTileWorldSize) + (_floorTileWorldSize * 0.5);
-      final centerY = (y * _floorTileWorldSize) + (_floorTileWorldSize * 0.5);
-      container.add(
-        RectangleComponent(
-          position: Vector2(centerX, centerY),
-          size: Vector2.all(_floorTileWorldSize),
-          anchor: Anchor.center,
-          paint: Paint()..color = const Color(0xFF8A4B00),
-          priority: -100,
-        ),
-      );
-    }
-    _floors.add(container);
-  }
-
-  (int, int, int, int) _floorCellBounds() {
-    var minX = 1 << 30;
-    var minY = 1 << 30;
-    var maxX = -(1 << 30);
-    var maxY = -(1 << 30);
-    for (final key in _floorCellKeys) {
-      final cell = _parseCellKey(key);
-      minX = min(minX, cell.$1);
-      minY = min(minY, cell.$2);
-      maxX = max(maxX, cell.$1);
-      maxY = max(maxY, cell.$2);
-    }
-    return (minX, minY, maxX, maxY);
-  }
-
-  String _cellKey(int x, int y) => '$x:$y';
-
-  (int, int) _parseCellKey(String key) {
-    final split = key.split(':');
-    if (split.length != 2) {
-      return (0, 0);
-    }
-    return (int.tryParse(split[0]) ?? 0, int.tryParse(split[1]) ?? 0);
-  }
-
-  bool _isFloorCell(int x, int y) => _floorCellKeys.contains(_cellKey(x, y));
-
-  bool _hasNeighborFloorCell(int x, int y) {
-    for (var dy = -1; dy <= 1; dy++) {
-      for (var dx = -1; dx <= 1; dx++) {
-        if (_isFloorCell(x + dx, y + dy)) {
-          return true;
-        }
-      }
-    }
-    return false;
-  }
-
-  bool _vertexIsLower(int vx, int vy) {
-    return _isFloorCell(vx - 1, vy - 1) ||
-        _isFloorCell(vx, vy - 1) ||
-        _isFloorCell(vx - 1, vy) ||
-        _isFloorCell(vx, vy);
-  }
-
-  String _wangKey({
-    required bool nw,
-    required bool ne,
-    required bool sw,
-    required bool se,
-  }) {
-    String label(bool lower) => lower ? 'lower' : 'upper';
-    return 'NW:${label(nw)}|NE:${label(ne)}|SW:${label(sw)}|SE:${label(se)}';
+    _activeTheme = themeForLevel(levelNumber);
   }
 
   void _addVerticalWall({
@@ -4877,14 +4869,6 @@ class SpinnerGame extends FlameGame
         size: Vector2(wallThickness, height),
       ),
     );
-    _addWallVisualForBounds(
-      rect: Rect.fromCenter(
-        center: Offset(x, (top + bottom) * 0.5),
-        width: wallThickness,
-        height: height,
-      ),
-      vertical: true,
-    );
   }
 
   void _addHorizontalWall({
@@ -4904,14 +4888,6 @@ class SpinnerGame extends FlameGame
         position: Vector2((left + right) * 0.5, y),
         size: Vector2(width, wallThickness),
       ),
-    );
-    _addWallVisualForBounds(
-      rect: Rect.fromCenter(
-        center: Offset((left + right) * 0.5, y),
-        width: width,
-        height: wallThickness,
-      ),
-      vertical: false,
     );
   }
 
@@ -4975,6 +4951,11 @@ class SpinnerGame extends FlameGame
       ).inflate(radius + 6);
 
       if (rect.contains(point)) {
+        return true;
+      }
+    }
+    for (final prop in _bumpers) {
+      if (candidate.distanceTo(prop.position) < prop.radius + radius + 10) {
         return true;
       }
     }
@@ -5042,29 +5023,9 @@ class SpinnerGame extends FlameGame
   }
 
   bool _blocksDoorLane(_RoomPlan room, Vector2 candidate, double radius) {
-    final rect = room.worldRect!;
-    final center = room.center;
-    final laneHalf = _activeCorridorWidth * 0.62;
-    final edgeDepth = 112 + radius;
-
-    final nearLeftLane =
-        room.exits.containsKey(RoomDirection.left) &&
-        candidate.x < rect.left + edgeDepth &&
-        (candidate.y - center.y).abs() < laneHalf + radius;
-    final nearRightLane =
-        room.exits.containsKey(RoomDirection.right) &&
-        candidate.x > rect.right - edgeDepth &&
-        (candidate.y - center.y).abs() < laneHalf + radius;
-    final nearTopLane =
-        room.exits.containsKey(RoomDirection.up) &&
-        candidate.y < rect.top + edgeDepth &&
-        (candidate.x - center.x).abs() < laneHalf + radius;
-    final nearBottomLane =
-        room.exits.containsKey(RoomDirection.down) &&
-        candidate.y > rect.bottom - edgeDepth &&
-        (candidate.x - center.x).abs() < laneHalf + radius;
-
-    return nearLeftLane || nearRightLane || nearTopLane || nearBottomLane;
+    final point = Offset(candidate.x, candidate.y);
+    final pad = radius + 48;
+    return room.doorways.any((d) => d.inflate(pad).contains(point));
   }
 
   Vector2 _safeRespawnPosition() {
@@ -5664,6 +5625,7 @@ class SpinnerGame extends FlameGame
           'coinReward': chest.coinReward,
           'opened': chest.isOpened,
           'room': room?.toJson(),
+          if (_jackpotChests.contains(chest)) 'jackpot': true,
         };
       }).toList(),
       'powerups': _powerups
@@ -5752,7 +5714,7 @@ class SpinnerGame extends FlameGame
     _applyThemeForLevel(levelNumber);
     _layoutLevel(level);
     _buildLevelGeometry(level);
-    _spawnCenterBumpers(level);
+    _spawnRoomProps(level);
     if (levelState != null &&
         (levelState['levelIndex'] as num?)?.toInt() == _currentLevelIndex) {
       _spawnLevelContentFromSnapshot(level, levelState);
@@ -5766,6 +5728,9 @@ class SpinnerGame extends FlameGame
       _spawnSpinner(level);
     }
     _spawnQueuedDebugEnemiesForCurrentLevel();
+    _comboRing = ComboRingComponent();
+    world.add(_comboRing!);
+    _floorElapsed = 0;
 
     _isCharging = false;
     _spinDetector.reset();
@@ -5784,7 +5749,6 @@ class SpinnerGame extends FlameGame
     _enemyRooms.clear();
     _enemyBounds.clear();
     _chestRooms.clear();
-    var carvedFloorForPits = false;
 
     for (final room in level.rooms.values) {
       if (room.type == RoomType.start) {
@@ -5886,8 +5850,6 @@ class SpinnerGame extends FlameGame
           );
           _pits.add(pit);
           world.add(pit);
-          carvedFloorForPits =
-              _carveFloorCellsForPit(pit) || carvedFloorForPits;
         }
       }
     }
@@ -5907,9 +5869,16 @@ class SpinnerGame extends FlameGame
           coinReward: (json['coinReward'] as num?)?.toInt() ?? 0,
         );
         if (json['opened'] == true) {
-          chest.open();
+          chest.open(react: false);
         }
         _chests.add(chest);
+        if (json['jackpot'] == true) {
+          if (!chest.isOpened) {
+            _jackpotChests.add(chest);
+          }
+          world.add(chest);
+          continue;
+        }
         final room =
             _gridPosFromJson(json['room']) ??
             _findRoomForPoint(level, chest.position);
@@ -5946,10 +5915,6 @@ class SpinnerGame extends FlameGame
         _powerups.add(powerup);
         world.add(powerup);
       }
-    }
-
-    if (carvedFloorForPits) {
-      _refreshFloorVisualsFromCells();
     }
   }
 
@@ -6246,6 +6211,10 @@ class _RoomPlan {
   final List<_GridPos> neighbors = <_GridPos>[];
   final List<_InteriorWallPlan> interiorWalls = <_InteriorWallPlan>[];
 
+  /// World rects of corridor tiles inside this room, rebuilt with the level
+  /// geometry; not persisted.
+  final List<Rect> doorways = <Rect>[];
+
   RoomType type = RoomType.combat;
 
   int turretCount = 0;
@@ -6405,35 +6374,6 @@ class _QueuedDebugSpawnPlacement {
   final EnemyType type;
   final EnemyArchetype archetype;
   final int count;
-}
-
-class _ThemeSprites {
-  _ThemeSprites({
-    required this.image,
-    required this.floorTileSprites,
-    required this.wangTileSpritesByKey,
-    required this.lowerTerrainSprite,
-    required this.upperTerrainSprite,
-    this.wallTileSprites = const <Sprite>[],
-    this.openFloorTileSprites = const <Sprite>[],
-  });
-
-  final ui.Image image;
-  final List<Sprite> floorTileSprites;
-  final Map<String, Sprite> wangTileSpritesByKey;
-  final Sprite? lowerTerrainSprite;
-  final Sprite? upperTerrainSprite;
-
-  /// Dedicated wall texture variants (distinct from floor art), sliced from
-  /// [DungeonThemeAssets.wallPngAsset]. Empty when the theme ships no wall art
-  /// yet, in which case callers fall back to floor-sprite reuse.
-  final List<Sprite> wallTileSprites;
-
-  /// Variant tiles for fully-interior floor cells, sliced from
-  /// [DungeonThemeAssets.openFloorPngAsset]. Empty when the theme ships none,
-  /// in which case callers fall back to the plain Wang floor tile (which
-  /// visibly repeats across large open rooms).
-  final List<Sprite> openFloorTileSprites;
 }
 
 class _GridPos {

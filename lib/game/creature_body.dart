@@ -22,7 +22,7 @@ enum CreatureSilhouette {
   /// Pulser enemy — round mushroom thumb with polka-dot body.
   pulserCap,
 
-  /// Turret enemy — squat dome with a single tracking eye-scanner.
+  /// Turret enemy — top-down armoured base, 8-way barrel and scanner eye.
   turretEye,
 
   /// Boss — big round warden with chunky shoulders and a rune eye.
@@ -464,111 +464,115 @@ class CreatureRenderer {
     CreaturePalette palette,
     CreatureRenderState state,
   ) {
+    // Seen straight from above: a round armoured base, a stubby barrel that
+    // steps between 8 directions, and a domed cap with the scanner eye. The
+    // barrel and eye are placed per direction; nothing is rotated.
     final r = state.radius;
     final snapped = snapTo8(state.facingAngle);
-
-    _drawGroundShadow(canvas, palette, r, widthMul: 1.9, heightMul: 0.4);
-
-    // Squat dome base — wider at bottom, tapering up. Two rounded rectangles
-    // stacked give a cute chunky bunker feel without being "mechanical cold".
-    final basePath = Path();
-    final baseRect = RRect.fromLTRBR(
-      -r * 0.95,
-      -r * 0.15,
-      r * 0.95,
-      r * 0.9,
-      Radius.circular(r * 0.45),
-    );
-    basePath.addRRect(baseRect);
-    canvas.drawPath(basePath, Paint()..color = palette.body);
-
-    // Armor band — a darker horizontal stripe for "plating".
-    canvas.drawRRect(
-      RRect.fromLTRBR(
-        -r * 0.85,
-        r * 0.22,
-        r * 0.85,
-        r * 0.44,
-        Radius.circular(r * 0.12),
-      ),
-      Paint()..color = palette.bodyShadow,
-    );
-
-    // Three bolts along the band for extra texture.
-    for (var i = -1; i <= 1; i++) {
-      canvas.drawCircle(
-        Offset(i * r * 0.48, r * 0.33),
-        r * 0.06,
-        Paint()..color = palette.accent,
-      );
-    }
-
-    // Dome top — a chunky rounded cap that sits above the base.
-    final dome = Path()
-      ..addOval(Rect.fromCenter(
-        center: Offset(0, -r * 0.25),
-        width: r * 1.65,
-        height: r * 1.1,
-      ));
-    canvas.drawPath(dome, Paint()..color = palette.body);
-    canvas.drawPath(dome, Paint()
-      ..color = palette.belly
-      ..style = PaintingStyle.fill
-      ..blendMode = BlendMode.srcOver);
-    // Highlight band on the dome's upper-left gives volume.
-    canvas.drawOval(
-      Rect.fromCenter(
-        center: Offset(-r * 0.28, -r * 0.55),
-        width: r * 0.7,
-        height: r * 0.25,
-      ),
-      Paint()..color = palette.belly,
-    );
-
-    // Outline the whole silhouette in dark for pop.
+    final fx = cos(snapped);
+    final fy = sin(snapped);
     final outline = Paint()
       ..color = palette.outline
       ..style = PaintingStyle.stroke
-      ..strokeWidth = r * 0.09;
+      ..strokeJoin = StrokeJoin.round
+      ..strokeWidth = r * 0.1;
+
+    // Soft contact shadow, offset straight down.
+    canvas.drawCircle(
+      Offset(0, r * 0.14),
+      r * 1.02,
+      Paint()
+        ..color = palette.bodyShadow.withValues(alpha: 0.55)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2.4),
+    );
+
+    // Armoured base ring with a darker inner groove and bolts.
+    final basePath = Path()
+      ..addOval(Rect.fromCircle(center: Offset.zero, radius: r * 0.95));
+    canvas.drawPath(basePath, Paint()..color = palette.body);
+    canvas.drawCircle(
+      Offset.zero,
+      r * 0.72,
+      Paint()
+        ..color = palette.bodyShadow
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = r * 0.12,
+    );
+    final bolt = Paint()..color = palette.belly;
+    for (var i = 0; i < 6; i++) {
+      final t = i * pi / 3 + pi / 6;
+      canvas.drawCircle(
+        Offset(cos(t) * r * 0.84, sin(t) * r * 0.84),
+        r * 0.07,
+        bolt,
+      );
+    }
     canvas.drawPath(basePath, outline);
+
+    // Barrel: drawn before the cap so the cap hides its root.
+    final telegraph = state.telegraphPulse;
+    final barrelLen = r * (1.38 - telegraph * 0.12);
+    final barrelHalf = r * 0.3;
+    final px = -fy;
+    final py = fx;
+    final tip = Offset(fx * barrelLen, fy * barrelLen);
+    final barrel = Path()
+      ..moveTo(px * barrelHalf, py * barrelHalf)
+      ..lineTo(tip.dx + px * barrelHalf, tip.dy + py * barrelHalf)
+      ..lineTo(tip.dx - px * barrelHalf, tip.dy - py * barrelHalf)
+      ..lineTo(-px * barrelHalf, -py * barrelHalf)
+      ..close();
+    canvas.drawPath(barrel, Paint()..color = palette.bodyShadow);
+    canvas.drawPath(barrel, outline);
+    // Muzzle: a chunky collar that glows while the shot winds up.
+    if (telegraph > 0) {
+      canvas.drawCircle(
+        tip,
+        r * (0.3 + telegraph * 0.18),
+        Paint()
+          ..color = palette.accent.withValues(alpha: 0.25 + telegraph * 0.5)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3.2),
+      );
+    }
+    canvas.drawCircle(tip, r * 0.34, Paint()..color = palette.body);
+    canvas.drawCircle(tip, r * 0.34, outline);
+    canvas.drawCircle(
+      tip,
+      r * 0.16,
+      Paint()..color = Color.lerp(palette.outline, palette.accent, telegraph)!,
+    );
+
+    // Domed cap with an upper-left highlight.
+    final dome = Path()
+      ..addOval(Rect.fromCircle(center: Offset.zero, radius: r * 0.56));
+    canvas.drawPath(dome, Paint()..color = palette.belly);
+    canvas.drawOval(
+      Rect.fromCenter(
+        center: Offset(-r * 0.18, -r * 0.2),
+        width: r * 0.42,
+        height: r * 0.26,
+      ),
+      Paint()..color = palette.eye.withValues(alpha: 0.7),
+    );
     canvas.drawPath(dome, outline);
 
-    // Single large "eye scanner" that steps to one of 8 positions around the
-    // dome's equator. This is what "8-dir" looks like on a turret — the eye
-    // moves, the body doesn't rotate.
-    final eyeCenter = Offset(
-      cos(snapped) * r * 0.62,
-      sin(snapped) * r * 0.62 - r * 0.15,
-    );
-    // Glow base behind the eye.
-    final glowStrength = 0.4 + state.telegraphPulse * 0.6;
-    canvas.drawCircle(
-      eyeCenter,
-      r * 0.32,
-      Paint()
-        ..color = palette.accent.withValues(alpha: 0.35 * glowStrength)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3.2),
-    );
-    // Eye socket (dark).
-    canvas.drawCircle(eyeCenter, r * 0.22, Paint()..color = palette.outline);
-    // Iris — accent color, grows with telegraphPulse.
-    final irisR = r * (0.14 + state.telegraphPulse * 0.04);
+    // Scanner eye sits on the cap, nudged toward the facing direction.
+    final eyeCenter = Offset(fx * r * 0.22, fy * r * 0.22);
+    canvas.drawCircle(eyeCenter, r * 0.2, Paint()..color = palette.outline);
+    final irisR = r * (0.13 + telegraph * 0.04) * (state.alert ? 1.1 : 1.0);
     canvas.drawCircle(eyeCenter, irisR, Paint()..color = palette.accent);
-    // Pupil — pulsing black dot at the iris center.
     canvas.drawCircle(
-      eyeCenter,
-      irisR * 0.42,
+      eyeCenter + Offset(fx, fy) * (irisR * 0.25),
+      irisR * 0.45,
       Paint()..color = palette.outline,
     );
-    // Shine spot on the iris.
     canvas.drawCircle(
       eyeCenter + Offset(-irisR * 0.4, -irisR * 0.4),
       irisR * 0.3,
       Paint()..color = const Color(0xCCFFFFFF),
     );
 
-    // Damage flash applied across base+dome silhouette.
-    final silhouette = Path.combine(PathOperation.union, basePath, dome);
+    final silhouette = Path.combine(PathOperation.union, basePath, barrel);
     _maybeApplyDamageFlash(canvas, silhouette, state.damageFlashStrength);
   }
 

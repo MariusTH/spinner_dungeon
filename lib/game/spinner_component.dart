@@ -9,13 +9,14 @@ import '../systems/combat_system.dart';
 import '../systems/spinner_parts.dart';
 import 'bumper_component.dart';
 import 'enemy_component.dart';
+import 'hit_reaction.dart';
 import 'physics.dart';
 import 'spinner_game.dart';
 import 'spinner_top_physics.dart';
 import 'wall_component.dart';
 
 class SpinnerComponent extends CircleComponent
-    with CollisionCallbacks, HasGameReference<SpinnerGame> {
+    with CollisionCallbacks, HasGameReference<SpinnerGame>, HitReaction {
   SpinnerComponent({required Vector2 position})
     : velocity = Vector2.zero(),
       angularVelocity = 0,
@@ -54,10 +55,13 @@ class SpinnerComponent extends CircleComponent
   // Blade profile is applied at spawn; defaults are safe for the fallback build
   // in case `configureBuildVisual` is never called (e.g., in tests).
   BladeShape _bladeShape = BladeShape.standard;
+
   /// Build-defined reach (catalog “blade reach”) before the run-time stance.
   double _bladeReachBase = 3;
+
   /// `true` = extended blade arc (larger), `false` = tucked (tighter, safer).
   bool _bladesWideStance = true;
+
   /// `true` — matches loadout [SpinnerBuildStats.bladeReach]. `false` — tucked in.
   static const double _wideStanceFactor = 1.0;
   static const double _compactStanceFactor = 0.68;
@@ -93,8 +97,7 @@ class SpinnerComponent extends CircleComponent
   }
 
   void _applyBladeStanceReach() {
-    final factor =
-        _bladesWideStance ? _wideStanceFactor : _compactStanceFactor;
+    final factor = _bladesWideStance ? _wideStanceFactor : _compactStanceFactor;
     final newReach = (_bladeReachBase * factor).clamp(0.5, 14.0);
     final reachChanged = (newReach - _bladeReach).abs() > 0.01;
     _bladeReach = newReach;
@@ -410,11 +413,7 @@ class SpinnerComponent extends CircleComponent
         ..color = Color.fromARGB((160 * pulse).round(), 120, 220, 255)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 2.4 + pulse * 2;
-      canvas.drawCircle(
-        Offset.zero,
-        radius + 4 + (6 * (1 - u)),
-        ringPaint,
-      );
+      canvas.drawCircle(Offset.zero, radius + 4 + (6 * (1 - u)), ringPaint);
     }
 
     if (game.tetherActive) {
@@ -637,14 +636,8 @@ class SpinnerComponent extends CircleComponent
 
     final path = Path();
     path.moveTo(inner, -thickness * 0.2);
-    final outerRect = Rect.fromCircle(
-      center: Offset.zero,
-      radius: outer,
-    );
-    final innerRect = Rect.fromCircle(
-      center: Offset.zero,
-      radius: inner,
-    );
+    final outerRect = Rect.fromCircle(center: Offset.zero, radius: outer);
+    final innerRect = Rect.fromCircle(center: Offset.zero, radius: inner);
     path.arcTo(outerRect, -sweep * 0.5, sweep, false);
     path.arcTo(innerRect, sweep * 0.5, -sweep, false);
     path.close();
@@ -807,11 +800,16 @@ class SpinnerComponent extends CircleComponent
       _timeSinceImpact = 0;
       _resolveWallOverlaps();
       game.clampSpinnerToArena(this);
+      game.onSpinnerBanked();
       return;
     }
 
     if (other is BumperComponent) {
       _timeSinceImpact = 0;
+      final impactSpeed = velocity.length;
+      other.triggerHitReaction(strength: 1.4);
+      game.onSpinnerBanked();
+      other.onSpinnerHit(impactSpeed);
       final spinnerAway = CollisionSystem.directionAwayFrom(
         from: other.position,
         to: position,
@@ -876,24 +874,30 @@ class SpinnerComponent extends CircleComponent
         earlyLevelFactor: game.spinnerContactDamageEarlyFactor,
       );
       final zoneBonus = isBladeZoneHit ? _bladeDamageBonus : 1.0;
-      final damage = (baseDamage * zoneBonus).clamp(1.0, 9999.0);
-      final canDamageEnemy = other.canTakeDamageFromSpinner(position);
-      if (canDamageEnemy) {
-        final heavyHit = damage >= other.maxHp * 0.75;
-        final defeated = other.hp <= damage;
-        other.takeDamage(damage);
-        final mid = (position + other.position) / 2;
-        game.onSpinnerEnemyImpact(
-          impactSpeed: speed,
-          damage: damage,
-          enemyDefeated: defeated || other.isDead,
-          heavyHit: heavyHit,
-          impactWorldPos: mid,
-        );
-        triggerHitConfirm();
-        if (isBladeZoneHit) {
-          _bladeHitFlashTime = _bladeHitFlashDuration;
-        }
+      // Armour scales damage but never blocks it: every enemy is killable.
+      final hitKind = other.spinnerHitKind(position);
+      final damage = (baseDamage * zoneBonus * hitKind.damageMultiplier).clamp(
+        1.0,
+        9999.0,
+      );
+      final canDamageEnemy = hitKind != EnemyHitKind.armored;
+      final heavyHit = damage >= other.maxHp * 0.75;
+      final defeated = other.hp <= damage;
+      other.takeDamage(damage);
+      other.onSpinnerHitKind(hitKind);
+      final mid = (position + other.position) / 2;
+      game.onSpinnerEnemyImpact(
+        impactSpeed: speed,
+        damage: damage,
+        enemyDefeated: defeated || other.isDead,
+        heavyHit: heavyHit,
+        impactWorldPos: mid,
+        hitLabel: hitKind.label,
+        crit: hitKind.isCrit,
+      );
+      triggerHitConfirm();
+      if (isBladeZoneHit) {
+        _bladeHitFlashTime = _bladeHitFlashDuration;
       }
 
       final spinnerToEnemy = CollisionSystem.directionAwayFrom(
@@ -914,14 +918,12 @@ class SpinnerComponent extends CircleComponent
           velocity = velocity.normalized() * maxCollisionSpeed;
         }
         _targetVelocity = velocity.clone();
-        if (canDamageEnemy) {
-          other.addImpulse(
-            CombatSystem.knockback(
-              direction: spinnerToEnemy,
-              force: speed * 0.31,
-            ),
-          );
-        }
+        other.addImpulse(
+          CombatSystem.knockback(
+            direction: spinnerToEnemy,
+            force: speed * (canDamageEnemy ? 0.31 : 0.12),
+          ),
+        );
       }
 
       if (other.isAbsorber && !game.isInvasionMode) {
@@ -988,6 +990,7 @@ class SpinnerComponent extends CircleComponent
 
   void triggerDamageFlash() {
     _damageFlashTime = _damageFlashDuration;
+    triggerHitReaction(strength: 1.6);
   }
 
   void triggerHitConfirm() {

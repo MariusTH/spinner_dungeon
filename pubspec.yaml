@@ -71,7 +71,6 @@ flutter:
     - assets/levels/room_templates/
     - assets/images/dungeon/
     - assets/images/enemies/
-    - assets/images/props/
     - assets/images/powerups/
     - assets/images/ui/
 

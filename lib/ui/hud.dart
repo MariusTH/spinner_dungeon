@@ -46,6 +46,10 @@ class Hud extends StatelessWidget {
                         child: _GameplayEssentialsStrip(game: game),
                       ),
                     ),
+                    if (game.activeWarden != null) ...[
+                      const SizedBox(height: 8),
+                      IgnorePointer(child: _WardenBar(game: game)),
+                    ],
                     if (game.hudDebugOverlayVisible) ...[
                       const SizedBox(height: 8),
                       _HudDebugRunPanel(game: game),
@@ -88,7 +92,11 @@ class Hud extends StatelessWidget {
               if (!game.progressLoaded)
                 const Center(child: _LoadingBanner())
               else if (game.runPhase == RunPhase.runOver)
-                Center(child: _RunOverBanner(game: game))
+                Center(
+                  child: game.runWon
+                      ? _VictoryBanner(game: game)
+                      : _RunOverBanner(game: game),
+                )
               else if (game.levelComplete) ...[
                 if (!game.levelClearAcknowledged) ...[
                   // Full-screen pass-through so the playfield can receive
@@ -148,6 +156,35 @@ class Hud extends StatelessWidget {
   }
 }
 
+/// Floor timer against par; turns ember once over par (no speed bonus).
+class _FloorPaceLabel extends StatelessWidget {
+  const _FloorPaceLabel({required this.game});
+
+  final SpinnerGame game;
+
+  static String _clock(double seconds) {
+    final s = seconds.floor();
+    return '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final elapsed = game.floorElapsedSeconds;
+    final par = game.floorParSeconds;
+    final overPar = elapsed > par;
+    return Text(
+      'Floor ${_clock(elapsed)}  ·  par ${_clock(par)}',
+      style: TextStyle(
+        fontSize: 11,
+        fontWeight: FontWeight.w800,
+        color: overPar
+            ? const Color(0xFFFF6A1F)
+            : WorkbenchPalette.parchment.withValues(alpha: 0.85),
+      ),
+    );
+  }
+}
+
 class _GameplayEssentialsStrip extends StatelessWidget {
   const _GameplayEssentialsStrip({required this.game});
 
@@ -181,6 +218,23 @@ class _GameplayEssentialsStrip extends StatelessWidget {
                 ratio: game.hpRatio,
                 fill: const Color(0xFF57D16F),
               ),
+              if (!game.isInvasionMode) ...[
+                const SizedBox(height: 8),
+                _FloorPips(game: game),
+                const SizedBox(height: 6),
+                _ChunkyMiniStatBar(
+                  label: game.levelComplete
+                      ? 'Floor cleared!'
+                      : 'Rooms ${game.zonesClearedInLevel}/${game.zonesInLevel}'
+                            '  ·  ${game.enemiesRemaining} foes left',
+                  ratio: game.levelProgressRatio,
+                  fill: const Color(0xFF6CCBFF),
+                ),
+                const SizedBox(height: 6),
+                _RunTallyRow(game: game),
+                const SizedBox(height: 6),
+                _FloorPaceLabel(game: game),
+              ],
               const SizedBox(height: 6),
               Text(
                 'Hold for debug info',
@@ -206,6 +260,246 @@ class _GameplayEssentialsStrip extends StatelessWidget {
               ],
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One pip per campaign floor: done floors filled, the current one ringed in
+/// action yellow, and the Warden's floor marked with a crown.
+class _FloorPips extends StatelessWidget {
+  const _FloorPips({required this.game});
+
+  final SpinnerGame game;
+
+  @override
+  Widget build(BuildContext context) {
+    final total = game.totalLevels;
+    final current = game.levelNumber;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          'FLOOR $current/$total',
+          style: const TextStyle(
+            color: WorkbenchPalette.parchment,
+            fontSize: 12,
+            fontWeight: FontWeight.w900,
+            letterSpacing: 0.8,
+          ),
+        ),
+        const SizedBox(width: 8),
+        for (var floor = 1; floor <= total; floor++)
+          Padding(
+            padding: const EdgeInsets.only(right: 4),
+            child: _FloorPip(
+              done: floor < current || (floor == current && game.levelComplete),
+              current: floor == current,
+              warden: floor == total,
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _FloorPip extends StatelessWidget {
+  const _FloorPip({
+    required this.done,
+    required this.current,
+    required this.warden,
+  });
+
+  final bool done;
+  final bool current;
+  final bool warden;
+
+  @override
+  Widget build(BuildContext context) {
+    const size = 14.0;
+    final fill = done
+        ? WorkbenchPalette.actionHighlight
+        : WorkbenchPalette.ink.withValues(alpha: 0.65);
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        color: fill,
+        shape: warden ? BoxShape.rectangle : BoxShape.circle,
+        borderRadius: warden ? BorderRadius.circular(3) : null,
+        border: Border.all(
+          color: current
+              ? WorkbenchPalette.actionHighlight
+              : WorkbenchPalette.woodEdge,
+          width: current ? 2 : 1.5,
+        ),
+      ),
+      child: warden
+          ? Icon(
+              Icons.emoji_events,
+              size: 9,
+              color: done ? WorkbenchPalette.ink : const Color(0xFFFF6A1F),
+            )
+          : null,
+    );
+  }
+}
+
+/// Score · coins · whole-run room progress, one compact line.
+class _RunTallyRow extends StatelessWidget {
+  const _RunTallyRow({required this.game});
+
+  final SpinnerGame game;
+
+  @override
+  Widget build(BuildContext context) {
+    final pct = (game.campaignProgressRatio * 100).round();
+    const style = TextStyle(
+      color: WorkbenchPalette.parchment,
+      fontSize: 11,
+      fontWeight: FontWeight.w800,
+    );
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Icon(
+          Icons.star,
+          size: 12,
+          color: WorkbenchPalette.actionHighlight,
+        ),
+        const SizedBox(width: 2),
+        Text('${game.runScore}', style: style),
+        const SizedBox(width: 8),
+        const Icon(
+          Icons.circle,
+          size: 10,
+          color: WorkbenchPalette.actionHighlight,
+        ),
+        const SizedBox(width: 3),
+        Text('${game.runCoins}', style: style),
+        const SizedBox(width: 8),
+        Text(
+          'Run $pct%',
+          style: style.copyWith(
+            color: WorkbenchPalette.parchment.withValues(alpha: 0.85),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Boss health bar shown while the Warden is alive on this floor.
+class _WardenBar extends StatelessWidget {
+  const _WardenBar({required this.game});
+
+  final SpinnerGame game;
+
+  @override
+  Widget build(BuildContext context) {
+    final warden = game.activeWarden;
+    if (warden == null) {
+      return const SizedBox.shrink();
+    }
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 320),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: WorkbenchPalette.deepVoid.withValues(alpha: 0.92),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: const Color(0xFFFF6A1F), width: 2),
+            boxShadow: <BoxShadow>[
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.4),
+                offset: const Offset(2, 3),
+                blurRadius: 0,
+              ),
+            ],
+          ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+            child: _ChunkyMiniStatBar(
+              label: 'THE WARDEN  ·  smash it to win',
+              ratio: warden.healthRatio,
+              fill: const Color(0xFFFF6A1F),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _VictoryBanner extends StatelessWidget {
+  const _VictoryBanner({required this.game});
+
+  final SpinnerGame game;
+
+  @override
+  Widget build(BuildContext context) {
+    final stats = game.runStats;
+    final chainNote = game.maxSpinChainThisRun > 1
+        ? '\nBest chain ×${game.maxSpinChainThisRun}'
+        : '';
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: WorkbenchPalette.deepVoid.withValues(alpha: 0.94),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: WorkbenchPalette.actionHighlight, width: 3),
+        boxShadow: <BoxShadow>[
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.5),
+            offset: const Offset(3, 5),
+            blurRadius: 0,
+          ),
+        ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 18),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.emoji_events,
+              size: 44,
+              color: WorkbenchPalette.actionHighlight,
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'VICTORY!',
+              style: TextStyle(
+                color: WorkbenchPalette.actionHighlight,
+                fontSize: 30,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 2,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              'The Warden is scrap. Dungeon cleared.',
+              style: TextStyle(
+                color: WorkbenchPalette.parchment.withValues(alpha: 0.9),
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Score ${game.runScore}\n'
+              'Foes smashed ${stats.enemiesKilled} · Coins ${game.runCoins}'
+              '$chainNote\n\n'
+              'Tap to return to the main menu',
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: WorkbenchPalette.parchment,
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                height: 1.4,
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -1460,7 +1754,7 @@ class _TutorialPrompt extends StatelessWidget {
     return (
       title: 'Descend deeper for unlocks',
       body:
-          'Each new floor banks coins and unlocks new spinner parts. Defeat the Warden on Lv 10.',
+          'Each new floor banks coins and unlocks new spinner parts. Defeat the Warden on floor ${SpinnerGame.campaignFloorCount} to win.',
     );
   }
 

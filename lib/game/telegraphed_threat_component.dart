@@ -29,6 +29,7 @@ class TelegraphedThreatComponent extends PositionComponent
        arcRadius = 0,
        arcStartAngle = 0,
        arcSweep = 0,
+       cancelWhen = null,
        super(
          position: origin.clone(),
          anchor: Anchor.centerLeft,
@@ -43,6 +44,7 @@ class TelegraphedThreatComponent extends PositionComponent
     required this.onComplete,
     required this.canAdvanceTime,
     this.trackMuzzleWorld,
+    this.cancelWhen,
     this.outlineColor = const Color(0xCCFF6B4A),
     this.fillColor = const Color(0x55FF8A5C),
     super.priority,
@@ -73,6 +75,7 @@ class TelegraphedThreatComponent extends PositionComponent
        beamHalfWidth = 0,
        _dir = Vector2(1, 0),
        trackMuzzleWorld = null,
+       cancelWhen = null,
        super(position: center.clone(), anchor: Anchor.center);
 
   final TelegraphShape shape;
@@ -96,6 +99,10 @@ class TelegraphedThreatComponent extends PositionComponent
   /// When set, [position] follows this each frame (beam: muzzle; circle: center).
   final Vector2 Function()? trackMuzzleWorld;
 
+  /// When this returns true the telegraph is dropped without firing (e.g.
+  /// its owner was interrupted).
+  final bool Function()? cancelWhen;
+
   double _elapsed = 0;
   bool _fired = false;
 
@@ -116,6 +123,11 @@ class TelegraphedThreatComponent extends PositionComponent
     }
     super.update(dt);
     if (_fired) {
+      return;
+    }
+    if (cancelWhen?.call() ?? false) {
+      _fired = true;
+      removeFromParent();
       return;
     }
     if (!canAdvanceTime()) {

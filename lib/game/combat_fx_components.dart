@@ -31,9 +31,7 @@ class ImpactSparkBurstComponent extends PositionComponent
     final n = 6 + _rng.nextInt(3);
     for (var i = 0; i < n; i++) {
       _angles.add(_rng.nextDouble() * pi * 2);
-      _speeds.add(
-        (36 + _rng.nextDouble() * 72) * intensity.clamp(0.6, 1.8),
-      );
+      _speeds.add((36 + _rng.nextDouble() * 72) * intensity.clamp(0.6, 1.8));
     }
   }
 
@@ -183,6 +181,88 @@ class KapowEffectComponent extends PositionComponent
     )..layout();
     tpFill.paint(canvas, Offset(-tpFill.width / 2, 8));
 
+    canvas.restore();
+  }
+}
+
+/// Chunky floating label for trick shots ("BANK SHOT!", "DOUBLE!", "CRIT!").
+/// Pops in, drifts upward and fades. [stack] offsets several labels from the
+/// same hit so they don't overlap.
+class TrickCalloutComponent extends PositionComponent {
+  TrickCalloutComponent({
+    required Vector2 position,
+    required this.text,
+    this.color = const Color(0xFFFFC83B),
+    this.fontSize = 22,
+    int stack = 0,
+  }) : super(
+         position: position + Vector2(0, -34.0 - stack * 26),
+         anchor: Anchor.center,
+         priority: 95,
+       );
+
+  final String text;
+  final Color color;
+  final double fontSize;
+
+  static const double _duration = 0.85;
+  double _age = 0;
+
+  late final TextPainter _outline = TextPainter(
+    text: TextSpan(
+      text: text,
+      style: TextStyle(
+        fontSize: fontSize,
+        fontWeight: FontWeight.w900,
+        letterSpacing: 0.5,
+        foreground: Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 5
+          ..strokeJoin = StrokeJoin.round
+          ..color = const Color(0xFF1A1412),
+      ),
+    ),
+    textDirection: TextDirection.ltr,
+  )..layout();
+
+  late final TextPainter _fill = TextPainter(
+    text: TextSpan(
+      text: text,
+      style: TextStyle(
+        fontSize: fontSize,
+        fontWeight: FontWeight.w900,
+        letterSpacing: 0.5,
+        color: color,
+      ),
+    ),
+    textDirection: TextDirection.ltr,
+  )..layout();
+
+  @override
+  void update(double dt) {
+    super.update(dt);
+    _age += dt;
+    position.y -= 46 * dt;
+    if (_age >= _duration) {
+      removeFromParent();
+    }
+  }
+
+  @override
+  void render(Canvas canvas) {
+    final t = (_age / _duration).clamp(0.0, 1.0);
+    final pop = Curves.easeOutBack.transform((t / 0.25).clamp(0.0, 1.0));
+    final fade = t < 0.6 ? 1.0 : 1.0 - (t - 0.6) / 0.4;
+    canvas.save();
+    canvas.scale(0.4 + pop * 0.6);
+    final offset = Offset(-_fill.width / 2, -_fill.height / 2);
+    canvas.saveLayer(
+      null,
+      Paint()..color = Color.fromRGBO(0, 0, 0, fade.clamp(0.0, 1.0)),
+    );
+    _outline.paint(canvas, offset);
+    _fill.paint(canvas, offset);
+    canvas.restore();
     canvas.restore();
   }
 }

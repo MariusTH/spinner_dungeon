@@ -5,8 +5,10 @@ import 'package:flame/components.dart';
 import 'package:flutter/material.dart';
 
 import '../systems/collision_system.dart';
+import 'bumper_component.dart';
 import 'creature_body.dart';
 import 'enemy_taxonomy.dart';
+import 'hit_reaction.dart';
 import 'physics.dart';
 import 'spinner_component.dart';
 import 'spinner_game.dart';
@@ -14,8 +16,27 @@ import 'wall_component.dart';
 
 export 'enemy_taxonomy.dart' show EnemyArchetype, EnemyType;
 
+/// How a spinner strike landed; see [EnemyComponent.spinnerHitKind].
+enum EnemyHitKind {
+  normal(1.0, null),
+  armored(0.35, 'CLANK'),
+  weakSpot(2.0, 'CRIT!'),
+  backstab(2.5, 'BACKSTAB!'),
+  counter(2.0, 'COUNTER!'),
+  overload(2.0, 'OVERLOAD!');
+
+  const EnemyHitKind(this.damageMultiplier, this.label);
+
+  final double damageMultiplier;
+
+  /// Callout shown at the hit, or null for none.
+  final String? label;
+
+  bool get isCrit => damageMultiplier > 1;
+}
+
 class EnemyComponent extends CircleComponent
-    with CollisionCallbacks, HasGameReference<SpinnerGame> {
+    with CollisionCallbacks, HasGameReference<SpinnerGame>, HitReaction {
   // Legacy pixel-sprite image caches have been removed now that every enemy
   // silhouette is drawn procedurally via `CreatureRenderer`. Historical PNG
   // assets still live under `assets/images/enemies/` but are no longer loaded
@@ -95,7 +116,7 @@ class EnemyComponent extends CircleComponent
          archetype: archetype,
          position: position,
          radius: 24,
-         maxHp: 58 * hpMultiplier.clamp(0.6, 6).toDouble(),
+         maxHp: 46 * hpMultiplier.clamp(0.6, 6).toDouble(),
          moveSpeed: 28 * speedMultiplier.clamp(0.5, 2.2).toDouble(),
          initialVelocity: _hedgehogAxisVelocity(
            direction: direction,
@@ -287,7 +308,7 @@ class EnemyComponent extends CircleComponent
   double _hp;
   Vector2 _velocity;
   Vector2 _impulse = Vector2.zero();
-  double _hitFlashUntil = -1;
+  double _deathLinger = 0;
   double _hitPulseUntil = -1;
   double _contactCooldown = 0;
   double _behaviorTimer = 0;
@@ -295,6 +316,7 @@ class EnemyComponent extends CircleComponent
   double _dashCooldown = 0;
   double _turretShotTimer = 0;
   double _walkPhase = 0;
+
   /// Facing direction for soft-vector rendering; snapped to 8 octants in
   /// `CreatureRenderer` at draw time.
   double _creatureFacingAngle = 0;
@@ -305,6 +327,7 @@ class EnemyComponent extends CircleComponent
   bool _bossFanTelegraphBusy = false;
   bool _dashTelegraphActive = false;
   double _groundSlamTimer = 0;
+  bool _slamCharging = false;
   double _spikeHazardPulse = 0;
   final Random _random = Random();
 
@@ -357,14 +380,61 @@ class EnemyComponent extends CircleComponent
     return false;
   }
 
-  bool canTakeDamageFromSpinner(Vector2 spinnerPosition) {
-    if (hasDirectionalSpikes) {
-      // Mirror of the contact-damage check: the hedgehog is armored on
-      // its spike side and only takes damage when struck from one of the
-      // perpendicular weak patches.
-      return !_hedgehogSpikeFacingSpinner(spinnerPosition);
+  /// Classifies a spinner strike from [spinnerPosition]. Every enemy can
+  /// always be hurt; each type has one skill check that rewards a crit:
+  /// - hedgehog: weak sides crit, spike side is armoured (and hurts you)
+  /// - turret: hitting it from behind while its aim is locked for a shot
+  /// - walker: catching it during its dash or dash wind-up
+  /// - pulser: interrupting its slam while it charges (it overloads)
+  EnemyHitKind spinnerHitKind(Vector2 spinnerPosition) {
+    switch (type) {
+      case EnemyType.hedgehog:
+        return _hedgehogSpikeFacingSpinner(spinnerPosition)
+            ? EnemyHitKind.armored
+            : EnemyHitKind.weakSpot;
+      case EnemyType.turret:
+        if (_turretTelegraphBusy) {
+          final toSpinner = spinnerPosition - position;
+          if (toSpinner.length2 > 0) {
+            final facing = Vector2(cos(angle), sin(angle));
+            if (facing.dot(toSpinner.normalized()) < -0.2) {
+              return EnemyHitKind.backstab;
+            }
+          }
+        }
+      case EnemyType.walker:
+        if (_dashTimer > 0 || _dashTelegraphActive) {
+          return EnemyHitKind.counter;
+        }
+      case EnemyType.pulser:
+        if (_slamCharging) {
+          return EnemyHitKind.overload;
+        }
+      case EnemyType.boss:
+      case EnemyType.paddle:
+        break;
     }
-    return true;
+    return EnemyHitKind.normal;
+  }
+
+  /// Side effects of a classified strike, applied after its damage.
+  void onSpinnerHitKind(EnemyHitKind kind) {
+    if (kind == EnemyHitKind.overload && _slamCharging) {
+      _slamCharging = false;
+      game.triggerExplosion(
+        center: position.clone(),
+        radius: 120,
+        damage: 34,
+        exclude: this,
+      );
+    }
+  }
+
+  /// True while a pulser's ground slam is winding up.
+  bool get isSlamCharging => _slamCharging;
+
+  void endSlamCharge() {
+    _slamCharging = false;
   }
 
   /// True when the vector from the hedgehog to the spinner lies inside
@@ -411,6 +481,11 @@ class EnemyComponent extends CircleComponent
     super.update(dt);
 
     if (isDead) {
+      // Linger briefly so the killing blow shows its white flash.
+      _deathLinger -= dt;
+      if (_deathLinger <= 0) {
+        removeFromParent();
+      }
       return;
     }
 
@@ -453,8 +528,7 @@ class EnemyComponent extends CircleComponent
     if (_creatureDamageFlash > 0) {
       _creatureDamageFlash = max(0, _creatureDamageFlash - dt * 5.0);
     }
-    _creatureBreathPhase =
-        (_creatureBreathPhase + dt * 2.1) % (pi * 2);
+    _creatureBreathPhase = (_creatureBreathPhase + dt * 2.1) % (pi * 2);
   }
 
   @override
@@ -506,6 +580,20 @@ class EnemyComponent extends CircleComponent
       );
     }
 
+    // Bumpers, pillars and barrels are solid for walking enemies too.
+    if (type != EnemyType.turret &&
+        type != EnemyType.paddle &&
+        other is BumperComponent) {
+      final away = position - other.position;
+      if (away.length2 > 0) {
+        _velocity = CollisionSystem.bounce(
+          velocity: _velocity,
+          normal: away.normalized(),
+          restitution: 1,
+        );
+      }
+    }
+
     if (other is SpinnerComponent &&
         _contactCooldown <= 0 &&
         canDamageSpinnerOnContact(other.position)) {
@@ -521,9 +609,11 @@ class EnemyComponent extends CircleComponent
 
     _hp -= damage;
     final now = game.elapsedSeconds;
-    _hitFlashUntil = now + 0.12;
     _hitPulseUntil = now + 0.14;
     _creatureDamageFlash = 1.0;
+    triggerHitReaction(
+      strength: (0.8 + damage / _maxHp * 1.6).clamp(0.8, 2.0).toDouble(),
+    );
 
     if (_hp <= 0) {
       _die();
@@ -545,15 +635,8 @@ class EnemyComponent extends CircleComponent
 
   void _syncHitVisualFromElapsed() {
     final now = game.elapsedSeconds;
-    if (now < _hitFlashUntil) {
-      paint.color = Color.lerp(
-        _baseColor,
-        const Color(0xFFFF7040),
-        0.82,
-      )!;
-    } else {
-      paint.color = _baseColor;
-    }
+    // The white hit flash itself comes from [HitReaction].
+    paint.color = _baseColor;
 
     const pulseDur = 0.14;
     if (now < _hitPulseUntil) {
@@ -697,6 +780,7 @@ class EnemyComponent extends CircleComponent
     if (_groundSlamTimer <= 0 && !isDead) {
       _groundSlamTimer = 3.05 + _random.nextDouble() * 0.95;
       final slamDamage = (13 + game.levelNumber * 2.4).clamp(12, 48).toDouble();
+      _slamCharging = true;
       game.queueEnemyGroundSlam(
         centerWorld: () => position.clone(),
         radius: 102,
@@ -884,7 +968,11 @@ class EnemyComponent extends CircleComponent
 
     final blend = (dt * 14).clamp(0, 1).toDouble();
     final creatureTarget = atan2(direction.y, direction.x);
-    _creatureFacingAngle = _lerpAngle(_creatureFacingAngle, creatureTarget, blend);
+    _creatureFacingAngle = _lerpAngle(
+      _creatureFacingAngle,
+      creatureTarget,
+      blend,
+    );
   }
 
   double _lerpAngle(double from, double to, double t) {
@@ -936,7 +1024,10 @@ class EnemyComponent extends CircleComponent
       case EnemyType.pulser:
         telegraph = (sin(_spikeHazardPulse * 1.2) * 0.5 + 0.5).clamp(0.0, 1.0);
       case EnemyType.boss:
-        telegraph = (sin(_creatureBreathPhase * 0.7) * 0.5 + 0.5).clamp(0.0, 1.0);
+        telegraph = (sin(_creatureBreathPhase * 0.7) * 0.5 + 0.5).clamp(
+          0.0,
+          1.0,
+        );
       case EnemyType.hedgehog:
         telegraph = (sin(_spikeHazardPulse) * 0.5 + 0.5).clamp(0.0, 1.0);
       default:
@@ -1203,7 +1294,8 @@ class EnemyComponent extends CircleComponent
     _turretTelegraphBusy = false;
     _bossFanTelegraphBusy = false;
     _dashTelegraphActive = false;
-    removeFromParent();
+    triggerHitReaction(strength: 2);
+    _deathLinger = 0.12;
     game.onEnemyDefeated(this);
   }
 }
