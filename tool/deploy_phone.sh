@@ -63,7 +63,7 @@ echo "==> Deploying ${MODE} build to ${DEVICE_ID} (${PLATFORM:-unknown platform}
 flutter pub get
 
 if [[ "${SKIP_CHECKS}" -eq 0 ]]; then
-  echo "==> flutter analyze + test (same gate as CI; --skip-checks to bypass)"
+  echo "==> flutter analyze + test (--skip-checks to bypass)"
   flutter analyze --no-fatal-infos
   flutter test
 fi

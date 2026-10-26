@@ -55,7 +55,7 @@ app.*.map.json
 /output/
 
 # Secrets & deploy credentials — signing assets, API keys, env files.
-# CI reads these from GitHub Actions secrets, never from disk.
+# tool/testflight.env holds the App Store Connect API key for TestFlight deploys.
 *.env
 .env.*
 *.p12

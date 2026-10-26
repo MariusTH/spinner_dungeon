@@ -5,10 +5,10 @@ spinning-action dungeon crawler built with Flutter + Flame. Drag circles on the
 screen to charge your spinner, fling it into a procedurally generated dungeon,
 and smash everything that moves.
 
-> Throughout the codebase the short name `ssc` is used for the Dart package,
-> the iOS bundle id (`no.mariushorne.ssc`), and the Android application id
-> (`no.mariushorne.ssc`). The display name ("Spin Spin Carnage") is set on
-> each platform via `CFBundleDisplayName` / `android:label`.
+> Throughout the codebase the short name `ssc` is used for the Dart package
+> and the Android application id (`no.mariushorne.ssc`). The iOS bundle id is
+> `com.badweather.chorus` to match its App Store Connect record. The display
+> name ("Spin Spin Carnage") is set on each platform via `CFBundleDisplayName` / `android:label`.
 
 ## Development
 
@@ -76,7 +76,7 @@ Bump with:
 
 ## iOS / TestFlight
 
-1. Ensure `Runner` bundle id (`no.mariushorne.ssc`) and signing are correct in Xcode.
+1. Ensure `Runner` bundle id (`com.badweather.chorus`) and signing are correct in Xcode.
 2. Replace app icons in `ios/Runner/Assets.xcassets/AppIcon.appiconset`.
 3. Bump version/build (`./tool/bump_version.sh --build`).
 4. Build archive:

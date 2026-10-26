@@ -7,8 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **SSC — Spin Spin Carnage** is a top-down, physics-based spinning-action dungeon
 crawler built with **Flutter + Flame**. The player drags to charge a spinner,
 flings it into a procedurally generated dungeon, and smashes everything. Ships as
-a single mobile app. Dart package name and bundle/app id are `ssc` /
-`no.mariushorne.ssc`; the display name "Spin Spin Carnage" is set per-platform.
+a single mobile app. Dart package name and Android app id are `ssc` /
+`no.mariushorne.ssc`; the iOS bundle id is `com.badweather.chorus` (fixed by
+its App Store Connect record); the display name "Spin Spin Carnage" is set per-platform.
 
 ## Commands
 
@@ -43,10 +44,15 @@ Versioning (`pubspec.yaml` uses `version: x.y.z+build`):
 ./tool/bump_version.sh --build   # or --patch / --minor / --major (each also bumps build)
 ```
 
-CI (`.github/workflows/testflight.yml`) runs `flutter analyze --no-fatal-infos`
-then `flutter test` on push to `master`, then builds and uploads an iOS IPA to
-TestFlight. Keep both green; the build number is set from the CI run number, not
-`pubspec.yaml`.
+TestFlight deploys run locally, not in CI (setup: `docs/testflight.md`;
+credentials in gitignored `tool/testflight.env`). The script gates on
+`flutter analyze --no-fatal-infos` + `flutter test`, so keep both green; the
+build number is minutes-since-epoch, not `pubspec.yaml`:
+
+```bash
+./tool/deploy_testflight.sh            # analyze, test, archive, upload
+./tool/deploy_testflight.sh --no-upload   # archive + local .ipa only
+```
 
 ## Architecture
 
